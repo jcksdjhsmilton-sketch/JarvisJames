@@ -1974,7 +1974,7 @@ jobs:
 
               private fun makeConfig(m: ModelInfo, f: File, be: String): EngineConfig {
                   val backendObj = if (be == "gpu") Backend.GPU() else Backend.CPU()
-                  val maxTok: Int? = if (m.id == "gemma") 4096 else null
+                  val maxTok: Int? = 2048
                   return EngineConfig(
                       modelPath = f.absolutePath,
                       backend = backendObj,
