@@ -18,7 +18,7 @@ jobs:
           set -e
           mkdir -p jarvis/app/src/main/kotlin/br/local/jarvis
 
-          cat > jarvis/settings.gradle.kts <<'EOF'
+          cat > jarvis/settings.gradle.kts <<'JVEOF'
           pluginManagement {
               repositories {
                   google()
@@ -35,22 +35,22 @@ jobs:
           }
           rootProject.name = "JarvisLocal"
           include(":app")
-          EOF
+          JVEOF
 
-          cat > jarvis/build.gradle.kts <<'EOF'
+          cat > jarvis/build.gradle.kts <<'JVEOF'
           plugins {
               id("com.android.application") version "8.11.1" apply false
               id("org.jetbrains.kotlin.android") version "2.2.20" apply false
           }
-          EOF
+          JVEOF
 
-          cat > jarvis/gradle.properties <<'EOF'
+          cat > jarvis/gradle.properties <<'JVEOF'
           org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
           android.useAndroidX=true
           kotlin.code.style=official
-          EOF
+          JVEOF
 
-          cat > jarvis/app/build.gradle.kts <<'EOF'
+          cat > jarvis/app/build.gradle.kts <<'JVEOF'
           plugins {
               id("com.android.application")
               id("org.jetbrains.kotlin.android")
@@ -79,9 +79,9 @@ jobs:
               implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
               implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
           }
-          EOF
+          JVEOF
 
-          cat > jarvis/app/src/main/AndroidManifest.xml <<'EOF'
+          cat > jarvis/app/src/main/AndroidManifest.xml <<'JVEOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET"/>
@@ -122,9 +122,9 @@ jobs:
                   </activity>
               </application>
           </manifest>
-          EOF
+          JVEOF
 
-          cat > jarvis/app/src/main/kotlin/br/local/jarvis/MainActivity.kt <<'EOF'
+          cat > jarvis/app/src/main/kotlin/br/local/jarvis/MainActivity.kt <<'JVEOF'
           package br.local.jarvis
 
           import android.Manifest
@@ -288,7 +288,6 @@ jobs:
               private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
               private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 
-              // views
               private lateinit var root: FrameLayout
               private lateinit var orb: OrbView
               private lateinit var titleTv: TextView
@@ -314,7 +313,6 @@ jobs:
               private lateinit var wakeSw: Switch
               private lateinit var personaEt: EditText
 
-              // estado
               @Volatile private var state = St.IDLE
               private val logBuf = StringBuilder()
               private val convoBase = StringBuilder()
@@ -338,7 +336,6 @@ jobs:
               private var pendingDialog: AlertDialog? = null
               private var torchOn = false
 
-              // voz
               private var tts: TextToSpeech? = null
               private var ttsReady = false
               private var ttsInit = false
@@ -351,7 +348,6 @@ jobs:
               private var offlineOk: Boolean? = null
               private var noSpeechCount = 0
 
-              // ---------- util ----------
               private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
               private fun gs(k: String, d: String): String = prefs.getString(k, d) ?: d
               private fun gb(k: String, d: Boolean): Boolean = prefs.getBoolean(k, d)
@@ -423,7 +419,6 @@ jobs:
                   return d.replace(Regex("\\p{M}+"), "").replace(Regex("[^a-z0-9: ]"), " ").replace(Regex("\\s+"), " ").trim()
               }
 
-              // ---------- ciclo de vida ----------
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   prefs = getSharedPreferences("jarvis", MODE_PRIVATE)
@@ -435,4 +430,1534 @@ jobs:
                       } catch (x: Throwable) {
                       }
                       old?.uncaughtException(t, e)
-             
+                  }
+                  buildUi()
+                  logd("Jarvis Local v1 | " + Build.MANUFACTURER + " " + Build.MODEL + " | Android " + Build.VERSION.RELEASE +
+                      " (API " + Build.VERSION.SDK_INT + ") | ABI " + Build.SUPPORTED_ABIS.joinToString())
+                  logd(memInfo())
+                  reportPreviousExit()
+                  recoverFromNativeCrash()
+                  initTts()
+                  checkOffline()
+                  ui.post(diagRunnable)
+                  loadModelOrOffer()
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  try {
+                      recognizer?.cancel()
+                  } catch (t: Throwable) {
+                  }
+                  if (state == St.LISTENING) setState(St.IDLE)
+                  stopSpeaking()
+              }
+
+              override fun onDestroy() {
+                  ui.removeCallbacksAndMessages(null)
+                  scope.cancel()
+                  try {
+                      recognizer?.destroy()
+                  } catch (t: Throwable) {
+                  }
+                  tts?.shutdown()
+                  releaseEngine()
+                  super.onDestroy()
+              }
+
+              override fun onTrimMemory(level: Int) {
+                  super.onTrimMemory(level)
+                  logd("onTrimMemory nível " + level + " | " + memInfo())
+                  if (level >= 15 && engineModel == "gemma" && !busy && ready) {
+                      switchToQwen("o sistema está com pouca memória")
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onBackPressed() {
+                  if (logPanel.visibility == View.VISIBLE) showLog(false)
+                  else if (settingsPanel.visibility == View.VISIBLE) showSettings(false)
+                  else super.onBackPressed()
+              }
+
+              override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+                  if (ev.action == MotionEvent.ACTION_DOWN) stopSpeaking()
+                  return super.dispatchTouchEvent(ev)
+              }
+
+              private fun reportPreviousExit() {
+                  val lc = gs("last_crash", "")
+                  if (lc.isNotEmpty()) {
+                      logd("ÚLTIMO ERRO (Java):\n" + lc)
+                      prefs.edit().remove("last_crash").apply()
+                  }
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      try {
+                          val am = getSystemService(ActivityManager::class.java)
+                          for (i in am.getHistoricalProcessExitReasons(packageName, 0, 3)) {
+                              logd("Saída anterior: " + exitName(i.reason) + " | " + i.description + " | há " +
+                                  ((System.currentTimeMillis() - i.timestamp) / 60000L) + " min")
+                          }
+                      } catch (t: Throwable) {
+                          logd("exit info: " + t.message)
+                      }
+                  }
+              }
+
+              private fun exitName(r: Int): String = when (r) {
+                  1 -> "EXIT_SELF"
+                  2 -> "SIGNALED"
+                  3 -> "LOW_MEMORY (faltou RAM)"
+                  4 -> "CRASH"
+                  5 -> "CRASH_NATIVE"
+                  6 -> "ANR"
+                  10 -> "USER_REQUESTED"
+                  13 -> "OTHER"
+                  else -> "code " + r
+              }
+
+              private fun recoverFromNativeCrash() {
+                  val pb = gs("pending_be", "")
+                  if (pb.isEmpty()) return
+                  logd("ATENÇÃO: o app caiu enquanto carregava/testava o motor em '" + pb + "'.")
+                  if (pb == "gpu") {
+                      prefs.edit().putBoolean("bad_gpu", true).putString("backend", "cpu").putString("pending_be", "").commit()
+                      logd("GPU marcada como instável. Vou usar a CPU. (Ajustes > Refazer teste limpa isso.)")
+                  } else {
+                      prefs.edit().putString("pending_be", "").commit()
+                      if (curModel().id == "gemma") {
+                          prefs.edit().putString("model", "qwen").commit()
+                          notice = "Reiniciei porque o Gemma derrubou o aplicativo. Troquei para o modelo leve Qwen."
+                          logd("Gemma derrubou o app na CPU. Troca para Qwen.")
+                      }
+                  }
+              }
+
+              private fun tv(t: String, sp: Float, color: Int): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = sp
+                  v.setTextColor(color)
+                  return v
+              }
+
+              private fun rounded(c: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(c)
+                  g.cornerRadius = dp(14).toFloat()
+                  return g
+              }
+
+              private fun btn(t: String, sp: Float = 15f, bg: Int = 0xFF12304A.toInt(), onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = t
+                  b.textSize = sp
+                  b.isAllCaps = false
+                  b.setTextColor(0xFFE0F7FF.toInt())
+                  b.background = rounded(bg)
+                  b.setPadding(dp(10), dp(6), dp(10), dp(6))
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              private fun lp(w: Int, h: Int, top: Int = 0, weight: Float = 0f): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(w, h, weight)
+                  p.topMargin = dp(top)
+                  return p
+              }
+
+              private fun edit(text: String, multi: Boolean): EditText {
+                  val e = EditText(this)
+                  e.setText(text)
+                  e.setTextColor(0xFFE0F7FF.toInt())
+                  e.setHintTextColor(0xFF607080.toInt())
+                  e.setBackgroundColor(0xFF12202F.toInt())
+                  e.setPadding(dp(10), dp(8), dp(10), dp(8))
+                  if (multi) {
+                      e.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                      e.minLines = 6
+                      e.gravity = Gravity.TOP
+                  }
+                  return e
+              }
+
+              private fun buildUi() {
+                  window.statusBarColor = 0xFF05080F.toInt()
+                  root = FrameLayout(this)
+                  root.setBackgroundColor(0xFF05080F.toInt())
+                  val main = LinearLayout(this)
+                  main.orientation = LinearLayout.VERTICAL
+                  main.setPadding(dp(12), dp(10), dp(12), dp(10))
+
+                  val top = LinearLayout(this)
+                  top.orientation = LinearLayout.HORIZONTAL
+                  top.gravity = Gravity.CENTER_VERTICAL
+                  titleTv = tv(assistantName(), 24f, 0xFF7FDBFF.toInt())
+                  top.addView(titleTv, LinearLayout.LayoutParams(0, WRAP, 1f))
+                  top.addView(btn("Conversa", 12f) {
+                      convoScroll.visibility = if (convoScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                  })
+                  top.addView(btn("Log", 12f) { showLog(true) }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  top.addView(btn("Ajustes", 12f) { showSettings(true) }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  main.addView(top, lp(MATCH, WRAP))
+
+                  statusTv = tv("Iniciando…", 14f, 0xFFB0C4D8.toInt())
+                  statusTv.gravity = Gravity.CENTER
+                  main.addView(statusTv, lp(MATCH, WRAP, 6))
+
+                  orb = OrbView(this)
+                  orb.setOnClickListener { startListening() }
+                  main.addView(orb, lp(MATCH, 0, 0, 1f))
+
+                  convoText = tv("", 14f, 0xFFD6E4F0.toInt())
+                  convoScroll = ScrollView(this)
+                  convoScroll.setBackgroundColor(0xFF0B1522.toInt())
+                  convoScroll.setPadding(dp(8), dp(6), dp(8), dp(6))
+                  convoScroll.addView(convoText)
+                  main.addView(convoScroll, lp(MATCH, dp(150), 4))
+
+                  diagTv = tv("", 10.5f, 0xFF6F8296.toInt())
+                  main.addView(diagTv, lp(MATCH, WRAP, 4))
+                  voiceTv = tv("", 10.5f, 0xFFFFB300.toInt())
+                  main.addView(voiceTv, lp(MATCH, WRAP))
+
+                  progressBox = LinearLayout(this)
+                  progressBox.orientation = LinearLayout.VERTICAL
+                  progressBox.visibility = View.GONE
+                  progressTv = tv("", 12f, 0xFFE0F7FF.toInt())
+                  progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  progressBar.max = 1000
+                  retryBtn = btn("Retomar download", 13f) {
+                      retryBtn.visibility = View.GONE
+                      val m = dlModel
+                      if (m != null) startDownload(m)
+                  }
+                  retryBtn.visibility = View.GONE
+                  progressBox.addView(progressTv)
+                  progressBox.addView(progressBar, lp(MATCH, WRAP))
+                  progressBox.addView(retryBtn, lp(WRAP, WRAP, 4))
+                  main.addView(progressBox, lp(MATCH, WRAP, 6))
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  inputEt = edit("", false)
+                  inputEt.hint = "Ou digite aqui…"
+                  inputEt.inputType = InputType.TYPE_CLASS_TEXT
+                  inputEt.imeOptions = EditorInfo.IME_ACTION_SEND
+                  inputEt.setOnEditorActionListener { _, _, _ ->
+                      sendTyped()
+                      true
+                  }
+                  row.addView(inputEt, LinearLayout.LayoutParams(0, WRAP, 1f))
+                  row.addView(btn("Enviar", 14f) { sendTyped() }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  main.addView(row, lp(MATCH, WRAP, 8))
+
+                  micBtn = btn("Toque para falar", 18f, 0xFF0D5C3A.toInt()) { startListening() }
+                  main.addView(micBtn, lp(MATCH, dp(72), 8))
+
+                  root.addView(main, FrameLayout.LayoutParams(MATCH, MATCH))
+                  settingsPanel = buildSettings()
+                  root.addView(settingsPanel, FrameLayout.LayoutParams(MATCH, MATCH))
+                  logPanel = buildLog()
+                  root.addView(logPanel, FrameLayout.LayoutParams(MATCH, MATCH))
+                  setContentView(root)
+              }
+
+              private fun label(t: String): TextView {
+                  val v = tv(t, 13f, 0xFF7FDBFF.toInt())
+                  v.setPadding(0, dp(14), 0, dp(4))
+                  return v
+              }
+
+              private fun buildSettings(): ScrollView {
+                  val sv = ScrollView(this)
+                  sv.setBackgroundColor(0xFF0A111C.toInt())
+                  sv.visibility = View.GONE
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(16), dp(16), dp(16), dp(40))
+                  col.addView(tv("Ajustes", 22f, 0xFF7FDBFF.toInt()))
+
+                  col.addView(label("Nome do assistente"))
+                  nameEt = edit(assistantName(), false)
+                  col.addView(nameEt)
+
+                  col.addView(label("Velocidade da voz"))
+                  rateSb = SeekBar(this)
+                  rateSb.max = 150
+                  rateSb.progress = ((gf("rate", 1.0f) - 0.5f) * 100f).toInt()
+                  col.addView(rateSb)
+
+                  col.addView(label("Modelo de IA"))
+                  modelRg = RadioGroup(this)
+                  for ((idx, m) in MODELS.withIndex()) {
+                      val rb = RadioButton(this)
+                      rb.id = 1000 + idx
+                      rb.setTextColor(0xFFE0F7FF.toInt())
+                      rb.text = m.label
+                      modelRg.addView(rb)
+                  }
+                  col.addView(modelRg)
+
+                  contSw = Switch(this)
+                  contSw.text = "Conversa contínua (voltar a ouvir sozinho)"
+                  contSw.setTextColor(0xFFE0F7FF.toInt())
+                  contSw.isChecked = gb("cont", false)
+                  col.addView(contSw, lp(MATCH, WRAP, 14))
+
+                  wakeSw = Switch(this)
+                  wakeSw.text = "Só responder se a frase tiver o nome"
+                  wakeSw.setTextColor(0xFFE0F7FF.toInt())
+                  wakeSw.isChecked = gb("wake", false)
+                  col.addView(wakeSw, lp(MATCH, WRAP, 10))
+
+                  col.addView(label("Personalidade (prompt de sistema; {nome} vira o nome)"))
+                  personaEt = edit(gs("persona", DEFAULT_PERSONA), true)
+                  col.addView(personaEt)
+
+                  col.addView(btn("Salvar e fechar", 16f, 0xFF0D5C3A.toInt()) { saveSettings() }, lp(MATCH, WRAP, 16))
+                  col.addView(btn("Baixar / conferir modelo") {
+                      val m = MODELS[max(0, modelRg.checkedRadioButtonId - 1000)]
+                      if (hasModel(m)) toast(m.label + " já está baixado (" + fmtBytes(modelFile(m).length()) + ")")
+                      else offerDownload(m)
+                  }, lp(MATCH, WRAP, 10))
+                  col.addView(btn("Refazer teste GPU/CPU") {
+                      prefs.edit().remove("backend").remove("bad_gpu").apply()
+                      showSettings(false)
+                      loadModel(true)
+                  }, lp(MATCH, WRAP, 10))
+                  col.addView(btn("Limpar memória") {
+                      prefs.edit().remove("hist").remove("notes").apply()
+                      resetPending = true
+                      convoBase.setLength(0)
+                      convoText.text = ""
+                      toast("Memória limpa")
+                  }, lp(MATCH, WRAP, 10))
+                  col.addView(btn("Ajustar a voz do celular (TTS)") {
+                      try {
+                          startActivity(Intent("com.android.settings.TTS_SETTINGS"))
+                      } catch (t: Throwable) {
+                          startActivity(Intent(Settings.ACTION_SETTINGS))
+                      }
+                  }, lp(MATCH, WRAP, 10))
+                  col.addView(btn("Ajuda: voz offline em português") { showVoiceHelp() }, lp(MATCH, WRAP, 10))
+                  sv.addView(col)
+                  return sv
+              }
+
+              private fun showSettings(show: Boolean) {
+                  if (show) {
+                      for ((idx, m) in MODELS.withIndex()) {
+                          val rb = modelRg.findViewById<RadioButton>(1000 + idx)
+                          rb.text = m.label + (if (hasModel(m)) "  (baixado)" else "  (não baixado, ~" + fmtBytes(m.approx) + ")")
+                      }
+                      modelRg.check(1000 + MODELS.indexOf(curModel()))
+                  } else {
+                      (getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                          .hideSoftInputFromWindow(root.windowToken, 0)
+                  }
+                  settingsPanel.visibility = if (show) View.VISIBLE else View.GONE
+              }
+
+              private fun saveSettings() {
+                  val newName = nameEt.text.toString().trim().ifEmpty { "Jarvis" }
+                  val rate = 0.5f + rateSb.progress / 100f
+                  val oldModel = gs("model", "gemma")
+                  val newModel = MODELS[max(0, modelRg.checkedRadioButtonId - 1000)].id
+                  prefs.edit()
+                      .putString("name", newName)
+                      .putFloat("rate", rate)
+                      .putBoolean("cont", contSw.isChecked)
+                      .putBoolean("wake", wakeSw.isChecked)
+                      .putString("persona", personaEt.text.toString().ifBlank { DEFAULT_PERSONA })
+                      .putString("model", newModel)
+                      .apply()
+                  titleTv.text = newName
+                  tts?.setSpeechRate(rate)
+                  resetPending = true
+                  showSettings(false)
+                  if (newModel != oldModel) loadModelOrOffer()
+              }
+
+              private fun buildLog(): LinearLayout {
+                  val box = LinearLayout(this)
+                  box.orientation = LinearLayout.VERTICAL
+                  box.setBackgroundColor(0xFF0A111C.toInt())
+                  box.visibility = View.GONE
+                  box.setPadding(dp(10), dp(10), dp(10), dp(10))
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.addView(btn("Copiar tudo", 13f) {
+                      val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      cm.setPrimaryClip(ClipData.newPlainText("log", logBuf.toString()))
+                      toast("Log copiado. Cole no chat com o Claude.")
+                  })
+                  bar.addView(btn("Limpar", 13f) {
+                      logBuf.setLength(0)
+                      logTv.text = ""
+                  }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  bar.addView(btn("Fechar", 13f) { showLog(false) }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  box.addView(bar)
+                  logTv = tv("", 11f, 0xFFB8F5C8.toInt())
+                  logTv.setTextIsSelectable(true)
+                  logScroll = ScrollView(this)
+                  logScroll.addView(logTv)
+                  box.addView(logScroll, lp(MATCH, 0, 8, 1f))
+                  return box
+              }
+
+              private fun showLog(show: Boolean) {
+                  logPanel.visibility = if (show) View.VISIBLE else View.GONE
+                  if (show) {
+                      logTv.text = logBuf.toString()
+                      logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
+                  }
+              }
+
+              private fun setState(s: St) {
+                  runOnUiThread {
+                      state = s
+                      if (!::orb.isInitialized) return@runOnUiThread
+                      orb.state = s
+                      if (ready || s != St.IDLE) {
+                          statusTv.text = when (s) {
+                              St.IDLE -> "Pronto. Toque no microfone."
+                              St.LISTENING -> "Ouvindo…"
+                              St.THINKING -> "Pensando…"
+                              St.SPEAKING -> "Falando… (toque na tela para parar)"
+                          }
+                      }
+                      micBtn.text = if (s == St.LISTENING) "Ouvindo… (toque para parar)" else "Toque para falar"
+                  }
+              }
+
+              private fun appendConvo(who: String, text: String) {
+                  runOnUiThread {
+                      convoBase.append(who).append(": ").append(text).append("\n\n")
+                      convoText.text = convoBase.toString()
+                      convoScroll.post { convoScroll.fullScroll(View.FOCUS_DOWN) }
+                  }
+              }
+
+              private fun setReplyText(s: String) {
+                  convoText.text = convoBase.toString() + assistantName() + ": " + s
+                  convoScroll.post { convoScroll.fullScroll(View.FOCUS_DOWN) }
+              }
+
+              private fun commitReply(s: String) {
+                  convoBase.append(assistantName()).append(": ").append(s).append("\n\n")
+                  convoText.text = convoBase.toString()
+              }
+
+              private fun sendTyped() {
+                  val t = inputEt.text.toString().trim()
+                  if (t.isEmpty()) return
+                  if (busy) {
+                      toast("Aguarde eu terminar a resposta atual.")
+                      return
+                  }
+                  inputEt.setText("")
+                  onUserText(t, true)
+              }
+
+              private fun initTts() {
+                  tts = TextToSpeech(this) { st ->
+                      if (st == TextToSpeech.SUCCESS) {
+                          val t = tts
+                          if (t != null) {
+                              val r = t.setLanguage(Locale("pt", "BR"))
+                              ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED
+                              t.setSpeechRate(gf("rate", 1.0f))
+                              t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                                  override fun onStart(utteranceId: String?) {
+                                      ui.post { if (epochOk(utteranceId)) setState(St.SPEAKING) }
+                                  }
+                                  override fun onDone(utteranceId: String?) {
+                                      ui.post { if (epochOk(utteranceId)) ttsDone() }
+                                  }
+                                  @Suppress("OVERRIDE_DEPRECATION")
+                                  override fun onError(utteranceId: String?) {
+                                      ui.post { if (epochOk(utteranceId)) ttsDone() }
+                                  }
+                              })
+                              logd("TTS iniciado. pt-BR disponível: " + ttsReady)
+                              if (!ttsReady) {
+                                  setStatus("Voz pt-BR do celular não encontrada. Veja Ajustes > Ajustar a voz do celular.")
+                              }
+                          }
+                      } else {
+                          logd("TTS falhou ao iniciar (código " + st + ")")
+                      }
+                      ttsInit = true
+                      maybeGreet()
+                  }
+              }
+
+              private fun epochOk(id: String?): Boolean = id != null && id.startsWith("e" + ttsEpoch + "-")
+
+              private fun ttsDone() {
+                  if (ttsPending > 0) ttsPending--
+                  if (ttsPending == 0 && genDone) finishTurn()
+              }
+
+              private fun speakSentence(s: String) {
+                  if (!speakOn || !ttsReady) return
+                  val c = cleanForSpeech(s)
+                  if (c.length < 2) return
+                  ttsPending++
+                  utt++
+                  tts?.speak(c, TextToSpeech.QUEUE_ADD, null, "e" + ttsEpoch + "-" + utt)
+              }
+
+              private fun stopSpeaking() {
+                  if (state == St.SPEAKING || ttsPending > 0) {
+                      ttsEpoch++
+                      tts?.stop()
+                      ttsPending = 0
+                      speakOn = false
+                      if (genDone) finishTurn() else setState(St.THINKING)
+                  }
+              }
+
+              private fun cleanForSpeech(s: String): String {
+                  var t = s.replace(Regex("(?s)<think>.*?(</think>|\\z)"), " ")
+                  t = t.replace(Regex("\\[([^\\]]*)]\\([^)]*\\)"), "\$1")
+                  t = t.replace(Regex("https?://\\S+"), " ")
+                  t = t.replace(Regex("(?m)^\\s*[-•*]\\s+"), "")
+                  val sb = StringBuilder()
+                  var i = 0
+                  while (i < t.length) {
+                      val cp = t.codePointAt(i)
+                      i += Character.charCount(cp)
+                      val keep = Character.isLetterOrDigit(cp) || Character.isWhitespace(cp) ||
+                          (cp < 128 && ".,;:!?'-()%/+\"".indexOf(cp.toChar()) >= 0) || cp == 0x2026
+                      if (keep) sb.appendCodePoint(cp)
+                  }
+                  return sb.toString().replace(Regex("\\s+"), " ").trim()
+              }
+
+              private fun visibleText(raw: String): String {
+                  var t = raw.replace(Regex("(?s)<think>.*?</think>"), "").replace("</think>", "")
+                  val i = t.indexOf("<think>")
+                  if (i >= 0) t = t.substring(0, i)
+                  val tag = "<think>"
+                  var k = minOf(tag.length - 1, t.length)
+                  while (k >= 1) {
+                      if (t.endsWith(tag.substring(0, k))) {
+                          t = t.substring(0, t.length - k)
+                          break
+                      }
+                      k--
+                  }
+                  return t.trimStart()
+              }
+
+              private fun extractSentences(buf: StringBuilder, final: Boolean): List<String> {
+                  val out = ArrayList<String>()
+                  while (true) {
+                      var cut = -1
+                      for (i in 0 until buf.length) {
+                          val ch = buf[i]
+                          if (ch == '\n') {
+                              cut = i
+                              break
+                          }
+                          if (ch == '.' || ch == '!' || ch == '?' || ch == '…') {
+                              if (i + 1 < buf.length && buf[i + 1].isWhitespace() && i >= 6) {
+                                  cut = i
+                                  break
+                              }
+                              if (final && i + 1 == buf.length) {
+                                  cut = i
+                                  break
+                              }
+                          }
+                      }
+                      if (cut < 0) break
+                      out.add(buf.substring(0, cut + 1))
+                      buf.delete(0, cut + 1)
+                  }
+                  if (final && buf.isNotBlank()) {
+                      out.add(buf.toString())
+                      buf.setLength(0)
+                  }
+                  return out
+              }
+
+              private fun reply(text: String) {
+                  busy = true
+                  speakOn = true
+                  genDone = true
+                  appendConvo(assistantName(), text)
+                  val sb = StringBuilder(text)
+                  for (s in extractSentences(sb, true)) speakSentence(s)
+                  if (ttsPending == 0) finishTurn()
+              }
+
+              private fun finishTurn() {
+                  busy = false
+                  setState(St.IDLE)
+                  if (gb("cont", false) && lastVoice && ready && !downloading) {
+                      ui.postDelayed({
+                          if (state == St.IDLE && !busy) startListening()
+                      }, 500)
+                  }
+              }
+
+              private fun greeting(): String {
+                  val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                  return if (h < 12) "Bom dia" else if (h < 18) "Boa tarde" else "Boa noite"
+              }
+
+              private fun maybeGreet() {
+                  if (!ready || !ttsInit) return
+                  if (notice.isNotEmpty()) {
+                      val n = notice
+                      notice = ""
+                      reply(n)
+                      return
+                  }
+                  if (!greeted) {
+                      greeted = true
+                      reply(greeting() + ", eu sou " + assistantName() + ". Estou pronto quando quiser.")
+                  }
+              }
+
+              private fun ensureMic(): Boolean {
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) return true
+                  requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 11)
+                  return false
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 11) {
+                      if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                          logd("Microfone liberado")
+                          checkOffline()
+                      } else {
+                          setStatus("Sem permissão de microfone. Use a caixa de texto ou libere nas configurações do app.")
+                      }
+                  }
+              }
+
+              private fun checkOffline() {
+                  if (Build.VERSION.SDK_INT < 33) {
+                      offlineOk = null
+                      return
+                  }
+                  try {
+                      val r = SpeechRecognizer.createSpeechRecognizer(this)
+                      val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                          .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      r.checkRecognitionSupport(i, mainExecutor, object : RecognitionSupportCallback {
+                          override fun onSupportResult(recognitionSupport: RecognitionSupport) {
+                              val inst = recognitionSupport.installedOnDeviceLanguages
+                              offlineOk = inst.any { it.lowercase().startsWith("pt") }
+                              logd("Voz offline instalada: " + inst + " -> pt: " + offlineOk)
+                              r.destroy()
+                              refreshDiag()
+                              if (offlineOk == false && !gb("help_shown", false)) {
+                                  prefs.edit().putBoolean("help_shown", true).apply()
+                                  runOnUiThread { showVoiceHelp() }
+                              }
+                          }
+                          override fun onError(error: Int) {
+                              logd("checkRecognitionSupport erro " + error)
+                              r.destroy()
+                          }
+                      })
+                  } catch (t: Throwable) {
+                      logd("checkOffline falhou: " + t.message)
+                  }
+              }
+
+              private fun showVoiceHelp() {
+                  val msg = "Para o app ouvir você SEM internet, baixe o pacote de voz offline:\n\n" +
+                      "1. Abra as Configurações do celular > Google > Configurações para apps do Google > Pesquisa, Assistente e Voz > Voz > Reconhecimento de voz offline.\n" +
+                      "2. Na aba 'Todos', toque em 'Português (Brasil)' e baixe.\n\n" +
+                      "Os nomes dos menus mudam um pouco conforme o aparelho. Enquanto o pacote não estiver instalado, o app pode usar o reconhecimento ONLINE do Google (seu áudio é enviado ao Google). Um aviso aparece na tela quando isso acontecer."
+                  val b = AlertDialog.Builder(this)
+                      .setTitle("Voz offline em português")
+                      .setMessage(msg)
+                      .setPositiveButton("Abrir ajustes de voz") { _, _ ->
+                          try {
+                              startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+                          } catch (t: Throwable) {
+                              startActivity(Intent(Settings.ACTION_SETTINGS))
+                          }
+                      }
+                      .setNegativeButton("Fechar", null)
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      b.setNeutralButton("Tentar baixar aqui") { _, _ ->
+                          try {
+                              val r = SpeechRecognizer.createSpeechRecognizer(this)
+                              val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                                  .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                                  .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                              r.triggerModelDownload(i)
+                              toast("Pedi o download do pacote. Pode levar alguns minutos.")
+                          } catch (t: Throwable) {
+                              toast("Não consegui pedir o download: " + t.message)
+                          }
+                      }
+                  }
+                  b.show()
+              }
+
+              private fun startListening() {
+                  if (state == St.LISTENING) {
+                      try {
+                          recognizer?.cancel()
+                      } catch (t: Throwable) {
+                      }
+                      setState(St.IDLE)
+                      return
+                  }
+                  if (!ensureMic()) return
+                  if (!ready) {
+                      setStatus("Ainda carregando o modelo…")
+                      return
+                  }
+                  if (busy) return
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      setStatus("Reconhecimento de voz indisponível neste aparelho.")
+                      showVoiceHelp()
+                      return
+                  }
+                  try {
+                      recognizer?.destroy()
+                  } catch (t: Throwable) {
+                  }
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  recognizer = r
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(params: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(rmsdB: Float) {
+                          orb.level = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+                      }
+                      override fun onBufferReceived(buffer: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onEvent(eventType: Int, params: Bundle?) {}
+                      override fun onPartialResults(partialResults: Bundle?) {
+                          val l = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          val p = l?.firstOrNull()
+                          if (!p.isNullOrBlank()) setStatus("Ouvindo: " + p)
+                      }
+                      override fun onResults(results: Bundle?) {
+                          orb.level = 0f
+                          val l = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          val t = l?.firstOrNull()
+                          setState(St.IDLE)
+                          if (t.isNullOrBlank()) {
+                              onListenFail(7)
+                          } else {
+                              noSpeechCount = 0
+                              onUserText(t, false)
+                          }
+                      }
+                      override fun onError(error: Int) {
+                          orb.level = 0f
+                          onListenFail(error)
+                      }
+                  })
+                  val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                  it.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                  it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  it.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                  it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  setState(St.LISTENING)
+                  r.startListening(it)
+              }
+
+              private fun onListenFail(e: Int) {
+                  val msg = when (e) {
+                      1 -> "tempo de rede esgotado"
+                      2 -> "erro de rede (o pacote offline pode estar faltando)"
+                      3 -> "erro de áudio"
+                      4 -> "erro no servidor de voz"
+                      5 -> "erro do cliente de voz"
+                      6 -> "não ouvi nada"
+                      7 -> "não entendi"
+                      8 -> "reconhecedor ocupado"
+                      9 -> "falta permissão de microfone"
+                      10 -> "muitos pedidos"
+                      11 -> "serviço de voz desconectado"
+                      12 -> "idioma pt-BR não suportado"
+                      13 -> "idioma pt-BR indisponível (baixe o pacote offline)"
+                      else -> "erro " + e
+                  }
+                  logd("Voz: " + msg + " (código " + e + ")")
+                  setState(St.IDLE)
+                  if (e == 6 || e == 7) {
+                      noSpeechCount++
+                      if (gb("cont", false) && noSpeechCount < 3) {
+                          ui.postDelayed({ if (state == St.IDLE && !busy) startListening() }, 400)
+                      } else if (noSpeechCount >= 3) {
+                          noSpeechCount = 0
+                          setStatus("Conversa contínua em pausa. Toque no microfone para continuar.")
+                      }
+                  } else if (e == 12 || e == 13 || e == 2) {
+                      showVoiceHelp()
+                  } else if (e != 5) {
+                      setStatus("Voz: " + msg)
+                  }
+              }
+
+              private fun onUserText(raw: String, typed: Boolean) {
+                  var text = raw.trim()
+                  if (text.isEmpty()) return
+                  lastVoice = !typed
+                  val pa = pendingAction
+                  if (pa != null) {
+                      val n = norm(text)
+                      if (Regex("\\b(nao|cancela|cancelar|deixa|esquece|negativo)\\b").containsMatchIn(n)) {
+                          pendingDialog?.dismiss()
+                          pendingAction = null
+                          appendConvo("Você", text)
+                          reply("Cancelado.")
+                          return
+                      }
+                      if (Regex("\\b(sim|confirmo|confirma|pode|claro|isso mesmo|ok|manda ver|vai)\\b").containsMatchIn(n)) {
+                          pendingDialog?.dismiss()
+                          pendingAction = null
+                          appendConvo("Você", text)
+                          pa()
+                          return
+                      }
+                      pendingDialog?.dismiss()
+                      pendingAction = null
+                  }
+                  if (!typed && gb("wake", false)) {
+                      if (!norm(text).contains(norm(assistantName()))) {
+                          logd("Ignorado (sem o nome): " + text)
+                          finishTurn()
+                          return
+                      }
+                      text = Regex(Regex.escape(assistantName()), RegexOption.IGNORE_CASE).replace(text, " ").trim(' ', ',', '.', '!', '?')
+                      if (text.isEmpty()) text = "Olá"
+                  }
+                  if (downloading) {
+                      appendConvo("Você", text)
+                      reply("Estou baixando o modelo. Aguarde terminar.")
+                      return
+                  }
+                  appendConvo("Você", text)
+                  if (handleCommand(text)) return
+                  ask(text)
+              }
+
+              private fun confirm(desc: String, action: () -> Unit) {
+                  pendingAction = action
+                  runOnUiThread {
+                      pendingDialog?.dismiss()
+                      pendingDialog = AlertDialog.Builder(this)
+                          .setMessage(desc + "\n\n(Você também pode dizer 'sim' ou 'não'.)")
+                          .setPositiveButton("Confirmar") { _, _ ->
+                              val a = pendingAction
+                              pendingAction = null
+                              a?.invoke()
+                          }
+                          .setNegativeButton("Cancelar") { _, _ ->
+                              pendingAction = null
+                              reply("Cancelado.")
+                          }
+                          .setOnCancelListener { pendingAction = null }
+                          .show()
+                  }
+                  reply(desc + " Confirma?")
+              }
+
+              private fun tryStart(i: Intent, okMsg: String, failMsg: String) {
+                  try {
+                      startActivity(i)
+                      reply(okMsg)
+                  } catch (t: Throwable) {
+                      logd("Intent falhou: " + t.message)
+                      reply(failMsg)
+                  }
+              }
+
+              private fun setTorch(on: Boolean): Boolean {
+                  val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
+                  for (id in cm.cameraIdList) {
+                      val ch = cm.getCameraCharacteristics(id)
+                      if (ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) {
+                          cm.setTorchMode(id, on)
+                          torchOn = on
+                          return true
+                      }
+                  }
+                  return false
+              }
+
+              private fun findApp(q: String): Pair<String, String>? {
+                  val pm = packageManager
+                  val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  var best: Pair<String, String>? = null
+                  var bestScore = 0
+                  for (ri in pm.queryIntentActivities(i, 0)) {
+                      val label = ri.loadLabel(pm).toString()
+                      val ln = norm(label)
+                      val score = if (ln == q) 100
+                      else if (ln.startsWith(q)) 80
+                      else if (ln.contains(q)) 60
+                      else if (ln.length >= 3 && q.contains(ln)) 50
+                      else 0
+                      if (score > bestScore) {
+                          bestScore = score
+                          best = Pair(label, ri.activityInfo.packageName)
+                      }
+                  }
+                  return best
+              }
+
+              private fun handleCommand(text: String): Boolean {
+                  val n = norm(text)
+
+                  val noteM = Regex("^(?:lembre-se|lembre se|lembre|anote|guarde|memorize)\\s+(?:que\\s+|de\\s+)?(.+)\$", RegexOption.IGNORE_CASE).find(text.trim())
+                  if (noteM != null) {
+                      addNote(noteM.groupValues[1])
+                      reply("Anotado. Vou me lembrar disso.")
+                      return true
+                  }
+
+                  if (Regex("\\b(que horas|as horas|horas sao|hora atual|horario)\\b").containsMatchIn(n)) {
+                      val c = Calendar.getInstance()
+                      val h = c.get(Calendar.HOUR_OF_DAY)
+                      val m = c.get(Calendar.MINUTE)
+                      val hs = when (h) {
+                          0 -> "É meia-noite"
+                          1 -> "É uma hora"
+                          12 -> "É meio-dia"
+                          else -> "São " + h + " horas"
+                      }
+                      val ms = if (m > 0) " e " + m + (if (m > 1) " minutos" else " minuto") else ""
+                      reply(hs + ms + ".")
+                      return true
+                  }
+
+                  if (Regex("\\b(que dia e hoje|data de hoje|qual a data|que data)\\b").containsMatchIn(n)) {
+                      val f = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR"))
+                      reply("Hoje é " + f.format(Date()) + ".")
+                      return true
+                  }
+
+                  if (n.contains("lanterna")) {
+                      val on = if (n.contains("apag") || n.contains("deslig")) false
+                      else if (n.contains("acend") || n.contains("lig")) true
+                      else !torchOn
+                      try {
+                          if (setTorch(on)) reply(if (on) "Lanterna ligada." else "Lanterna apagada.")
+                          else reply("Não encontrei o flash neste aparelho.")
+                      } catch (t: Throwable) {
+                          logd("Lanterna: " + t.message)
+                          reply("Não consegui acessar a lanterna.")
+                      }
+                      return true
+                  }
+
+                  if (n.contains("timer") || n.contains("temporizador") || n.contains("cronometro")) {
+                      val tm = Regex("(\\d{1,4})\\s*(segundos|segundo|seg|minutos|minuto|min|horas|hora)\\b").find(n)
+                      if (tm == null) {
+                          reply("De quanto tempo deve ser o timer?")
+                          return true
+                      }
+                      val v = tm.groupValues[1].toInt()
+                      val u = tm.groupValues[2]
+                      val secs = if (u.startsWith("seg")) v else if (u.startsWith("min")) v * 60 else v * 3600
+                      confirm("Criar um timer de " + v + " " + u + "?") {
+                          val i = Intent(AlarmClock.ACTION_SET_TIMER)
+                              .putExtra(AlarmClock.EXTRA_LENGTH, secs)
+                              .putExtra(AlarmClock.EXTRA_MESSAGE, assistantName())
+                              .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                          tryStart(i, "Timer criado.", "Não consegui criar o timer.")
+                      }
+                      return true
+                  }
+
+                  if (n.contains("alarme") || n.contains("despertador")) {
+                      var h = -1
+                      var mi = 0
+                      val a = Regex("(\\d{1,2})\\s*(?::|h|horas|hora)\\s*(?:e\\s*)?(\\d{1,2})?").find(n)
+                      val b = Regex("(\\d{1,2})\\s+e\\s+(\\d{1,2})").find(n)
+                      val c = Regex("\\b(\\d{1,2})\\b").find(n)
+                      if (a != null) {
+                          h = a.groupValues[1].toInt()
+                          mi = a.groupValues[2].toIntOrNull() ?: 0
+                      } else if (b != null) {
+                          h = b.groupValues[1].toInt()
+                          mi = b.groupValues[2].toInt()
+                      } else if (c != null) {
+                          h = c.groupValues[1].toInt()
+                      }
+                      if ((n.contains("da tarde") || n.contains("da noite")) && h in 1..11) h += 12
+                      if (h < 0 || h > 23 || mi > 59) {
+                          reply("Para que horas devo criar o alarme?")
+                          return true
+                      }
+                      val hh = h
+                      val mm = mi
+                      confirm("Criar um alarme para " + String.format(Locale.US, "%02d:%02d", hh, mm) + "?") {
+                          val i = Intent(AlarmClock.ACTION_SET_ALARM)
+                              .putExtra(AlarmClock.EXTRA_HOUR, hh)
+                              .putExtra(AlarmClock.EXTRA_MINUTES, mm)
+                              .putExtra(AlarmClock.EXTRA_MESSAGE, assistantName())
+                              .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                          tryStart(i, "Alarme criado.", "Não consegui criar o alarme.")
+                      }
+                      return true
+                  }
+
+                  val om = Regex("^(?:abrir|abra|abre|iniciar|inicie|execute|executar)\\s+(?:o |a |os |as )?(?:aplicativo |app )?(.+)\$").find(n)
+                  if (om != null) {
+                      val q = om.groupValues[1].trim()
+                      val app = findApp(q)
+                      if (app == null) {
+                          reply("Não encontrei um aplicativo chamado " + q + ".")
+                      } else {
+                          confirm("Abrir o aplicativo " + app.first + "?") {
+                              val li = packageManager.getLaunchIntentForPackage(app.second)
+                              reply("Abrindo " + app.first + ".")
+                              if (li != null) ui.postDelayed({ startActivity(li) }, 1500)
+                          }
+                      }
+                      return true
+                  }
+                  return false
+              }
+
+              private fun loadHistory(): List<Pair<Boolean, String>> {
+                  val raw = gs("hist", "")
+                  if (raw.isEmpty()) return emptyList()
+                  val out = ArrayList<Pair<Boolean, String>>()
+                  for (line in raw.split("\n")) {
+                      if (line.length < 3) continue
+                      out.add(Pair(line[0] == 'U', line.substring(2)))
+                  }
+                  return out
+              }
+
+              private fun addHistory(u: String, a: String) {
+                  val l = loadHistory().toMutableList()
+                  l.add(Pair(true, u))
+                  l.add(Pair(false, a))
+                  val sb = StringBuilder()
+                  for (p in l.takeLast(8)) {
+                      sb.append(if (p.first) "U " else "A ").append(p.second.replace("\n", " ").take(300)).append("\n")
+                  }
+                  prefs.edit().putString("hist", sb.toString().trimEnd()).apply()
+              }
+
+              private fun notes(): List<String> = gs("notes", "").split("\n").filter { it.isNotBlank() }
+
+              private fun addNote(n: String) {
+                  val l = notes().toMutableList()
+                  l.add(n.take(200))
+                  prefs.edit().putString("notes", l.takeLast(20).joinToString("\n")).apply()
+                  resetPending = true
+              }
+
+              private fun buildSystemPrompt(): String {
+                  val persona = gs("persona", DEFAULT_PERSONA).replace("{nome}", assistantName())
+                  val n = notes()
+                  return persona + (if (n.isEmpty()) "" else "\nFatos que o usuário pediu para você lembrar: " + n.joinToString("; ") + ".")
+              }
+
+              private fun makeConfig(m: ModelInfo, f: File, be: String): EngineConfig =
+                  EngineConfig(
+                      modelPath = f.absolutePath,
+                      backend = if (be == "gpu") Backend.GPU() else Backend.CPU(),
+                      maxNumTokens = if (m.id == "gemma") 4096 else null,
+                      cacheDir = cacheDir.absolutePath
+                  )
+
+              private fun releaseEngine() {
+                  ready = false
+                  try {
+                      conversation?.close()
+                  } catch (t: Throwable) {
+                  }
+                  conversation = null
+                  try {
+                      engine?.close()
+                  } catch (t: Throwable) {
+                  }
+                  engine = null
+                  System.gc()
+              }
+
+              private fun loadModelOrOffer() {
+                  val m = curModel()
+                  if (hasModel(m)) loadModel() else {
+                      setStatus("Modelo " + m.label + " ainda não baixado.")
+                      offerDownload(m)
+                  }
+              }
+
+              private fun loadModel(forceBench: Boolean = false) {
+                  if (loading) {
+                      logd("Já estou carregando…")
+                      return
+                  }
+                  loading = true
+                  ready = false
+                  val m = curModel()
+                  val f = modelFile(m)
+                  setState(St.IDLE)
+                  setStatus("Carregando " + m.label + "… (pode levar até 1 minuto)")
+                  scope.launch {
+                      try {
+                          releaseEngine()
+                          var be = gs("backend", "")
+                          if (be.isEmpty() || forceBench) {
+                              be = benchmark(m, f)
+                              prefs.edit().putString("backend", be).apply()
+                          }
+                          var ok = startEngine(m, f, be)
+                          if (!ok) {
+                              val other = if (be == "gpu") "cpu" else "gpu"
+                              if (!(other == "gpu" && gb("bad_gpu", false))) {
+                                  logd("Falhou com " + be + "; tentando " + other)
+                                  ok = startEngine(m, f, other)
+                                  if (ok) prefs.edit().putString("backend", other).apply()
+                              }
+                          }
+                          if (!ok) {
+                              if (m.id == "gemma") {
+                                  ui.postDelayed({ switchToQwen("o Gemma não conseguiu iniciar") }, 500)
+                              } else {
+                                  setStatus("Não consegui iniciar o modelo. Abra o Log e copie o texto.")
+                              }
+                          } else {
+                              ready = true
+                              logd("PRONTO. " + memInfo())
+                              setStep("pronto")
+                              runOnUiThread {
+                                  setState(St.IDLE)
+                                  maybeGreet()
+                              }
+                          }
+                      } catch (t: Throwable) {
+                          logd("loadModel erro: " + t.javaClass.simpleName + ": " + t.message)
+                      } finally {
+                          loading = false
+                      }
+                  }
+              }
+
+              private suspend fun benchmark(m: ModelInfo, f: File): String {
+                  setStep("Teste de GPU/CPU (só na primeira vez; pode levar 1 a 2 minutos)")
+                  setStatus("Testando GPU e CPU… só na primeira vez.")
+                  val res = HashMap<String, Double>()
+                  for (be in listOf("gpu", "cpu")) {
+                      if (be == "gpu" && gb("bad_gpu", false)) {
+                          logd("GPU marcada como instável; pulando o teste dela.")
+                          continue
+                      }
+                      prefs.edit().putString("pending_be", be).commit()
+                      val tps = try {
+                          testBackend(m, f, be)
+                      } catch (t: Throwable) {
+                          logd("Teste " + be + " falhou: " + t.javaClass.simpleName + ": " + t.message)
+                          -1.0
+                      }
+                      prefs.edit().putString("pending_be", "").commit()
+                      logd("Teste " + be + ": " + (if (tps > 0) String.format(Locale.US, "%.1f ~tok/s", tps) else "falhou"))
+                      if (tps > 0) res[be] = tps
+                  }
+                  val g = res["gpu"]
+                  val c = res["cpu"]
+                  val best = if (g != null && (c == null || g > c * 1.15)) "gpu" else "cpu"
+                  logd("Escolhido: " + best)
+                  return best
+              }
+
+              private suspend fun testBackend(m: ModelInfo, f: File, be: String): Double {
+                  val e = Engine(makeConfig(m, f, be))
+                  try {
+                      val ti = System.nanoTime()
+                      e.initialize()
+                      val t0 = System.nanoTime()
+                      logd("  " + be + ": carregou em " + ((t0 - ti) / 1_000_000L) + " ms | " + memInfo())
+                      val c = e.createConversation()
+                      var chars = 0
+                      c.sendMessageAsync("Conte de um a dez, por extenso, em português.").collect { msg ->
+                          chars += msg.toString().length
+                      }
+                      val t1 = System.nanoTime()
+                      c.close()
+                      val secs = (t1 - t0) / 1e9
+                      logd("  " + be + ": resposta de " + chars + " caracteres em " + String.format(Locale.US, "%.1f", secs) + " s")
+                      return if (chars < 5 || secs <= 0.0) -1.0 else (chars / 3.2) / secs
+                  } finally {
+                      try {
+                          e.close()
+                      } catch (t: Throwable) {
+                      }
+                  }
+              }
+
+              private suspend fun startEngine(m: ModelInfo, f: File, be: String): Boolean {
+                  prefs.edit().putString("pending_be", be).commit()
+                  try {
+                      setStep("Carregando " + m.label + " (" + be + ")")
+                      val t0 = System.currentTimeMillis()
+                      val e = Engine(makeConfig(m, f, be))
+                      e.initialize()
+                      engine = e
+                      engineModel = m.id
+                      curBackend = be
+                      conversation = null
+                      logd("Motor iniciado em " + (System.currentTimeMillis() - t0) + " ms (" + m.label + ", " + be + ")")
+                      return true
+                  } catch (t: Throwable) {
+                      logd("Falha ao iniciar " + m.label + " em " + be + ": " + t.javaClass.simpleName + ": " + t.message)
+                      return false
+                  } finally {
+                      prefs.edit().putString("pending_be", "").commit()
+                  }
+              }
+
+              private fun getConversation(): Conversation {
+                  val old = conversation
+                  if (old != null && turns < 10 && !resetPending) return old
+                  try {
+                      old?.close()
+                  } catch (t: Throwable) {
+                  }
+                  conversation = null
+                  resetPending = false
+                  val e = engine ?: throw IllegalStateException("motor não iniciado")
+                  val init = ArrayList<Message>()
+                  for (h in loadHistory().takeLast(6)) {
+                      init.add(if (h.first) Message.user(h.second) else Message.model(h.second))
+                  }
+                  turns = 0
+                  val sampler = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.7)
+                  val sys = Contents.of(buildSystemPrompt())
+                  val conv = try {
+                      e.createConversation(ConversationConfig(
+                          systemInstruction = sys,
+                          initialMessages = init,
+                          samplerConfig = sampler,
+                          thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0),
+                          maxOutputToken = 400
+                      ))
+                  } catch (t: Throwable) {
+                      logd("Conversa com 'thinking' falhou (" + t.message + "); tentando sem.")
+                      e.createConversation(ConversationConfig(
+                          systemInstruction = sys,
+                          initialMessages = init,
+                          samplerConfig = sampler
+                      ))
+                  }
+                  conversation = conv
+                  logd("Nova conversa criada (histórico: " + init.size + " msgs)")
+                  return conv
+              }
+
+              private fun ask(text: String) {
+                  if (!ready) {
+                      reply("O modelo ainda está carregando. Só um instante.")
+                      return
+                  }
+                  busy = true
+                  speakOn = true
+                  genDone = false
+                  setState(St.THINKING)
+                  val tStart = System.currentTimeMillis()
+                  scope.launch {
+                      val raw = StringBuilder()
+                      val sbuf = StringBuilder()
+                      var shown = ""
+                      var chars = 0
+                      var failed: Throwable? = null
+                      try {
+                          val conv = getConversation()
+                          conv.sendMessageAsync(text).collect { m ->
+                              raw.append(m.toString())
+                              val vis = visibleText(raw.toString())
+                              if (vis.length > shown.length && vis.startsWith(shown)) {
+                                  val d = vis.substring(shown.length)
+                                  shown = vis
+                                  chars += d.length
+                                  sbuf.append(d)
+                                  val sents = extractSentences(sbuf, false)
+                                  val snap = shown
+                                  runOnUiThread {
+                                      setReplyText(snap)
+                                      for (s in sents) speakSentence(s)
+                                  }
+                              }
+                          }
+                      } catch (t: Throwable) {
+                          failed = t
+                      }
+                      val rest = extractSentences(sbuf, true)
+                      val secs = (System.currentTimeMillis() - tStart) / 1000.0
+                      val fl = failed
+                      if (fl != null) {
+                          logd("Erro ao gerar: " + fl.javaClass.simpleName + ": " + fl.message)
+                          try {
+                              conversation?.close()
+                          } catch (t: Throwable) {
+                          }
+                          conversation = null
+                      } else {
+                          turns++
+                          lastTps = (chars / 3.2) / max(secs, 0.1)
+                          addHistory(text, shown)
+                      }
+                      val finalText = shown
+                      runOnUiThread {
+                          genDone = true
+                          if (finalText.isBlank()) {
+                              reply(if (fl != null) "Tive um problema ao pensar. Veja o log de diagnóstico." else "Desculpe, não consegui formular uma resposta.")
+                              return@runOnUiThread
+                          }
+                          commitReply(finalText)
+                          for (s in rest) speakSentence(s)
+                          logd("Resposta: " + chars + " caracteres em " + String.format(Locale.US, "%.1f", secs) +
+                              " s (~" + String.format(Locale.US, "%.1f", lastTps) + " tok/s) | " + memInfo())
+                          healthCheck()
+                          if (ttsPending == 0) finishTurn()
+                      }
+                  }
+              }
+
+              private fun healthCheck() {
+                  if (engineModel != "gemma") return
+                  val th = thermal()
+                  val av = availMb()
+                  if (th >= 3) switchToQwen("o celular está esquentando demais")
+                  else if (av < 500) switchToQwen("a memória está acabando")
+              }
+
+              private fun switchToQwen(reason: String) {
+                  if (curModel().id == "qwen") {
+                      setStatus("Problema: " + reason + ". Veja o Log.")
+                      return
+                  }
+                  val q = MODELS[1]
+                  prefs.edit().putString("model", "qwen").apply()
+                  logd("TROCA AUTOMÁTICA para Qwen3 0.6B: " + reason)
+                  toast("Troquei para o modelo leve (Qwen3 0.6B): " + reason)
+                  notice = "Troquei para o modelo leve Qwen, porque " + reason + ". Você pode voltar ao Gemma nos ajustes."
+                  if (hasModel(q)) loadModel() else offerDownload(q)
+              }
+
+              private fun isWifi(): Boolean {
+                  val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                  val nc = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+                  return nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+              }
+
+              private fun offerDownload(mi: ModelInfo) {
+                  runOnUiThread {
+                      val wifi = isWifi()
+                      val msg = "Preciso baixar o modelo " + mi.label + " (cerca de " + fmtBytes(mi.approx) +
+                          ") uma única vez. Depois o app funciona sem internet.\n\n" +
+                          (if (wifi) "Você está no Wi-Fi. Ótimo." else "ATENÇÃO: você NÃO está no Wi-Fi. Recomendo conectar ao Wi-Fi para não gastar seus dados móveis.") +
+                          "\n\nMantenha o app aberto durante o download. Se cair, toque em 'Retomar' e ele continua de onde parou."
+                      AlertDialog.Builder(this)
+                          .setTitle("Baixar modelo de IA")
+                          .setMessage(msg)
+                          .setCancelable(false)
+                          .setPositiveButton(if (wifi) "Baixar agora" else "Baixar mesmo assim") { _, _ -> startDownload(mi) }
+                          .setNegativeButton("Agora não") { _, _ ->
+                              setStatus("Modelo não baixado. Ajustes > Baixar / conferir modelo.")
+                          }
+                          .show()
+                  }
+              }
+
+              private fun startDownload(mi: ModelInfo) {
+                  if (downloading) return
+                  downloading = true
+                  dlModel = mi
+                  runOnUiThread {
+                      progressBox.visibility = View.VISIBLE
+                      retryBtn.visibility = View.GONE
+                      progressBar.progress = 0
+                      progressTv.text = "Preparando download de " + mi.label + "…"
+                  }
+                  setStep("Baixando " + mi.label)
+                  scope.launch {
+                      var ok = false
+                      var attempt = 0
+                      var fatal: String? = null
+                      while (!ok && attempt < 8 && fatal == null) {
+                          attempt++
+                          try {
+                              ok = downloadOnce(mi)
+                          } catch (t: FatalDl) {
+                              fatal = t.message
+                          } catch (t: Throwable) {
+                              logd("Download: " + t.javaClass.simpleName + ": " + t.message + " (tentativa " + attempt + ")")
+                              runOnUiThread { progressTv.text = "Conexão instável, tentando de novo (" + attempt + ")…" }
+                              delay(3000L * attempt)
+                          }
+                      }
+                      val fm = fatal
+                      runOnUiThread {
+                          downloading = false
+                          if (ok) {
+                              progressBox.visibility = View.GONE
+                              toast("Download concluído!")
+                              loadModel()
+                          } else {
+                              progressTv.text = if (fm != null) "Erro: " + fm else "Download interrompido. Toque em Retomar (continua de onde parou)."
+                              retryBtn.visibility = View.VISIBLE
+                              logd("Download parou. " + (fm ?: "sem conexão estável"))
+                          }
+                      }
+                  }
+              }
+
+              private fun showProgress(mi: ModelInfo, have: Long, total: Long, speed: Double) {
+                  runOnUiThread {
+                      progressBar.progress = if (total > 0) (have * 1000L / total).toInt() else 0
+                      progressTv.text = "Baixando " + mi.label + ": " + (have * 100L / max(total, 1L)) + "% — " +
+                          fmtBytes(have) + " de " + fmtBytes(total) + " — " + String.format(Locale.US, "%.1f", speed / 1e6) + " MB/s"
+                  }
+              }
+
+              private fun downloadOnce(mi: ModelInfo): Boolean {
+                  val dir = File(filesDir, "models")
+                  dir.mkdirs()
+                  val part = File(dir, mi.file + ".part")
+                  val dest = File(dir, mi.file)
+                  var have = if (part.exists()) part.length() else 0L
+                  var url = mi.url
+                  var conn: HttpURLConnection? = null
+                  var hops = 0
+                  while (true) {
+                      val c = URL(url).openConnection() as HttpURLConnection
+                      c.instanceFollowRedirects = false
+                      c.connectTimeout = 20000
+                      c.readTimeout = 30000
+                      c.setRequestProperty("User-Agent", "JarvisLocal/1.0")
+                      if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-")
+                      val code = c.responseCode
+                      if (code in 300..399) {
+                          val loc = c.getHeaderField("Location") ?: throw RuntimeException("redirecionamento sem destino")
+                          url = URL(URL(url), loc).toString()
+                          c.disconnect()
+                          hops++
+                          if (hops > 6) throw RuntimeException("redirecionamentos demais")
+                          continue
+                      }
+                      conn = c
+                      break
+                  }
+                  val c = conn ?: throw RuntimeException("sem conexão")
+                  val code = c.responseCode
+                  if (code == 401 || code == 403) {
+                      throw FatalDl("HTTP " + code + ": acesso negado. O modelo pode exigir login/licença no Hugging Face.")
+                  }
+                  if (code == 416) {
+                      part.delete()
+                      throw RuntimeException("HTTP 416: reiniciando do zero")
+                  }
+                  if (code != 200 && code != 206) throw RuntimeException("HTTP " + code)
+                  var total: Long
+                  if (code == 206) {
+                      val cr = c.getHeaderField("Content-Range")
+                      total = cr?.substringAfter('/')?.toLongOrNull() ?: (have + c.contentLengthLong)
+                  } else {
+                      have = 0L
+                      part.delete()
+                      total = c.contentLengthLong
+                  }
+                  if (total <= 0L) total = mi.approx
+                  val need = total - have
+                  if (filesDir.usableSpace < need + 200_000_000L) {
+                      throw FatalDl("Sem espaço: precisa de " + fmtBytes(need) + " livres no celular.")
+                  }
+                  logd("Download " + mi.label + ": retomando em " + fmtBytes(have) + " de " + fmtBytes(total))
+                  RandomAccessFile(part, "rw").use { raf ->
+                      raf.seek(have)
+                      val buf = ByteArray(256 * 1024)
+                      c.inputStream.use { ins ->
+                          var lastUi = 0L
+                          var lastBytes = have
+                          var lastT = System.currentTimeMillis()
+                          while (true) {
+                              val n = ins.read(buf)
+                              if (n < 0) break
+                              raf.write(buf, 0, n)
+                              have += n
+                              val now = System.currentTimeMillis()
+                              if (now - lastUi > 500) {
+                                  val speed = (have - lastBytes) * 1000.0 / max(now - lastT, 1L)
+                                  showProgress(mi, have, total, speed)
+                                  lastUi = now
+                                  lastBytes = have
+                                  lastT = now
+                              }
+                          }
+                      }
+                  }
+                  c.disconnect()
+                  if (have < total) throw RuntimeException("conexão caiu em " + fmtBytes(have))
+                  dest.delete()
+                  if (!part.renameTo(dest)) throw FatalDl("Não consegui salvar o arquivo do modelo.")
+                  logd("Download concluído: " + fmtBytes(dest.length()))
+                  return true
+              }
+          }
+          JVEOF
+
+          echo "Arquivos criados:"
+          find jarvis -type f | sort
+
+      - name: Instalar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+
+      - name: Instalar Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+
+      - name: Versão da biblioteca de IA que será usada
+        working-directory: jarvis
+        run: |
+          gradle --version
+          gradle -q :app:dependencies --configuration debugRuntimeClasspath | grep -i litertlm || true
+
+      - name: Compilar o APK
+        working-directory: jarvis
+        run: gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Preparar o APK
+        run: |
+          mkdir -p out
+          cp jarvis/app/build/outputs/apk/debug/app-debug.apk out/Jarvis-Local-${{ github.run_number }}.apk
+          ls -la out
+
+      - name: Guardar como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Local-APK
+          path: out/*.apk
+
+      - name: Publicar como Release
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Jarvis Local build ${{ github.run_number }}
+          files: out/*.apk
