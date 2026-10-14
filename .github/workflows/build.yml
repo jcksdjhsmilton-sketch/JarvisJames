@@ -70,8 +70,8 @@ jobs:
                   applicationId = "br.local.jarvis"
                   minSdk = 31
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "2.0"
                   ndk {
                       abiFilters.add("arm64-v8a")
                   }
@@ -174,6 +174,7 @@ jobs:
           import android.speech.SpeechRecognizer
           import android.speech.tts.TextToSpeech
           import android.speech.tts.UtteranceProgressListener
+          import android.text.Html
           import android.text.InputType
           import android.view.Gravity
           import android.view.MotionEvent
@@ -195,10 +196,13 @@ jobs:
           import android.widget.Toast
           import com.google.ai.edge.litertlm.*
           import kotlinx.coroutines.*
+          import org.json.JSONObject
           import java.io.File
           import java.io.RandomAccessFile
           import java.net.HttpURLConnection
           import java.net.URL
+          import java.net.URLDecoder
+          import java.net.URLEncoder
           import java.text.Normalizer
           import java.text.SimpleDateFormat
           import java.util.Calendar
@@ -214,6 +218,8 @@ jobs:
           class FatalDl(m: String) : Exception(m)
 
           val MODELS = listOf(
+              ModelInfo("llama", "Llama 3.2 3B Instruct", "Llama-3.2-3B-Instruct.litertlm",
+                  "https://huggingface.co/mlboydaisuke/Llama-3.2-3B-Instruct-LiteRT/resolve/main/model.litertlm", 2_100_000_000L),
               ModelInfo("gemma", "Gemma 4 E2B", "gemma-4-E2B-it.litertlm",
                   "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm", 2_580_000_000L),
               ModelInfo("qwen", "Qwen3 0.6B (leve)", "Qwen3-0.6B.litertlm",
@@ -224,6 +230,441 @@ jobs:
               "Fale sempre em português do Brasil. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
               "Responda em no máximo 3 frases curtas. Não use markdown, listas, emojis nem símbolos, porque suas respostas serão faladas em voz alta. " +
               "Se não souber algo, diga com honestidade."
+
+          enum class WebMode { NONE, GENERAL, NEWS, WEATHER }
+
+          class WebHit(val title: String, val snippet: String, val source: String)
+
+          class WebCtx(val text: String, val city: String?)
+
+          fun isHeavy(id: String): Boolean = id == "llama" || id == "gemma"
+
+          const val NO_WEB_NOTE = "[Nota: sem acesso à internet neste momento. Responda com o que você sabe e avise se algo puder estar desatualizado.] "
+
+          // Pesquisa na internet 100% gratuita e sem chave de API:
+          // DuckDuckGo (HTML) -> Bing (HTML) -> Wikipédia, Google Notícias (RSS) e Open-Meteo (clima).
+          object JarvisWeb {
+              private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+              private const val API_UA = "JarvisLocal/2.0 (assistente pessoal Android)"
+              private const val MAX_CHARS = 2200
+
+              fun norm(s: String): String {
+                  val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
+                  return d.replace(Regex("\\p{M}+"), "").replace(Regex("[^a-z0-9: ]"), " ").replace(Regex("\\s+"), " ").trim()
+              }
+
+              private val chitRe = Regex("^(?:(?:oi|ola|opa|e ai|bom dia|boa tarde|boa noite|tudo bem|tudo bom|obrigado|obrigada|valeu|tchau|ate logo|como voce esta|como vai|como voce vai|quem e voce|qual e o seu nome|qual o seu nome|qual seu nome|o que voce faz|o que voce pode fazer|voce esta ai|me ajuda|ajuda)\\s*)+\$")
+              private val weatherRe = Regex("\\b(?:clima|previsao do tempo|vai chover|esta chovendo|ta chovendo|quantos graus|temperatura (?:hoje|agora|amanha|atual|la fora|aqui|em)|faz (?:calor|frio)|esta (?:frio|calor)|o tempo (?:hoje|amanha|agora|em|na|no|la fora|aqui|vai)|como (?:esta|ta|vai estar|vai ficar) o tempo)\\b|qual (?:e )?a temperatura(?: agora| hoje| la fora| aqui| atual)?\$")
+              private val newsRe = Regex("\\b(?:noticias?|manchetes?|o que esta acontecendo)\\b")
+              private val explicitRe = Regex("\\b(?:pesquis\\w*|procur\\w*|busqu\\w*|buscar|google|na internet|na web)\\b")
+              private val noWebRe = Regex("\\b(?:traduz\\w*|escreva|escrever|crie|criar|invente|resum\\w*|reescrev\\w*|corrij\\w*|conte (?:uma|um)|piada|poema|poesia|calcul\\w*|finja|imagine|quanto e \\d|\\d+ (?:mais|menos|vezes|dividido))\\b")
+              private val leadRe = Regex("^(?:voce )?(?:sabe|conhece|poderia|pode|consegue)(?: me)?(?: dizer| falar| informar)? ")
+              private val selfRe = Regex("\\b(?:voce|seu|sua|seus|suas|te)\\b")
+              private val timeRe = Regex("\\b(?:ultimas?|ultimos?|recentes?|esta semana|essa semana|este mes|esse mes|este ano|esse ano|20(?:2[3-9]|3[0-9])|dolar|euro|bitcoin|cotacao|ibovespa|selic|inflacao|placar|campeonato|quem ganhou|quanto custa|quanto esta|preco|lancamento|lancou|estreia|em cartaz|presidente|governador|prefeito)\\b")
+              private val factRe = Regex("^(?:quem|quando|onde|qual|quais|quanto|quantos|quantas|quanta|por que|porque|o que|oque|que dia|que ano|como (?:fazer|faz|se faz|funciona|instalar|resolver|chegar|surgiu|foi|e feito|se escreve)|me (?:fale|diga|explique|conte)|fale sobre|explique|defina|diferenca entre|significado de|capital d)\\b")
+              private val defRe = Regex("^(?:quem (?:e|foi|era|sao)|o que (?:e|foi|sao|significa)|me (?:fale|conte) sobre|fale sobre|defina|explique|me explique|capital d|significado de|diferenca entre)\\b")
+
+              // n0 = texto normalizado (sem acento, minúsculo). nameN = nome do assistente normalizado.
+              fun decide(n0: String, nameN: String): WebMode {
+                  var n = n0
+                  if (nameN.length >= 2) n = n.replace(Regex("\\b" + Regex.escape(nameN) + "\\b"), " ")
+                  n = n.replace(Regex("\\s+"), " ").trim()
+                  if (n.length < 4) return WebMode.NONE
+                  if (chitRe.matches(n)) return WebMode.NONE
+                  if (weatherRe.containsMatchIn(n)) return WebMode.WEATHER
+                  if (newsRe.containsMatchIn(n)) return WebMode.NEWS
+                  if (explicitRe.containsMatchIn(n)) return WebMode.GENERAL
+                  if (noWebRe.containsMatchIn(n)) return WebMode.NONE
+                  val q = leadRe.replace(n, "")
+                  if (selfRe.containsMatchIn(q)) return WebMode.NONE
+                  if (timeRe.containsMatchIn(q)) return WebMode.GENERAL
+                  if (q.split(" ").size >= 3 && factRe.containsMatchIn(q)) return WebMode.GENERAL
+                  return WebMode.NONE
+              }
+
+              fun cleanQuery(raw: String): String {
+                  var q = raw.trim()
+                  q = q.replace(Regex("(?i)\\b(?:pesquise|pesquisar|pesquisa|procure|procurar|busque|buscar)\\b(?: na internet| no google| na web| online)?(?: por| sobre| a respeito de)?"), " ")
+                  q = q.replace(Regex("(?i)\\b(?:na internet|no google|na web)\\b"), " ")
+                  q = q.replace(Regex("(?i)^\\s*(?:por favor|voc[eê] (?:sabe|pode|poderia)(?: me)?(?: dizer)?)\\b,?"), " ")
+                  q = q.replace(Regex("[?!]+"), " ").replace(Regex("\\s+"), " ").trim().trim(',', '.', ' ')
+                  return if (q.length < 3) raw.trim() else q
+              }
+
+              fun newsTopic(raw: String): String {
+                  var q = cleanQuery(raw)
+                  q = q.replace(Regex("(?i)^(?:quais (?:s[aã]o )?)?(?:me (?:diga|fale|conte) )?(?:as |os )?(?:(?:[uú]ltimas|principais|[uú]ltimos) )?(?:not[ií]cias?|manchetes?)(?: (?:de hoje|do dia|de agora|mais recentes))?(?: (?:sobre|do|da|de|no|na|em))?\\s*"), "")
+                  q = q.replace(Regex("(?i)^o que (?:est[aá] acontecendo|aconteceu)(?: (?:no|na|em|com|de|do|da))?\\s*"), "")
+                  q = q.replace(Regex("(?i)\\b(?:hoje|agora)\\b"), " ").replace(Regex("\\s+"), " ").trim()
+                  return q
+              }
+
+              fun cityFrom(raw: String): String {
+                  val m = Regex("(?i)\\b(?:em|na|no|para|pra)\\s+([\\p{L}][\\p{L}' .-]{1,40})").find(raw) ?: return ""
+                  var c = m.groupValues[1]
+                  c = c.replace(Regex("(?i)\\s+(?:hoje|amanh[aã]|agora|neste momento|nesse momento|esta semana|essa semana|este fim de semana|esse fim de semana|fim de semana|depois de amanh[aã]|de noite|de manh[aã]|pela manh[aã]|esta noite|[aà] noite|[aà] tarde)\\b.*\$"), "")
+                  c = c.replace(Regex("[?!.,]+\$"), "").trim()
+                  val n = norm(c)
+                  if (n.length < 3) return ""
+                  if (Regex("^(?:minha|meu|nossa|nosso|aqui|casa|cidade|regiao|bairro|segunda|terca|quarta|quinta|sexta|sabado|domingo|semana|dia|noite|manha|tarde|hoje|amanha|agora|momento|geral|brasil)\\b").containsMatchIn(n)) return ""
+                  return c
+              }
+
+              fun wrap(ctx: WebCtx, question: String, mode: WebMode, now: String): String {
+                  val head = when (mode) {
+                      WebMode.WEATHER -> "Dados de clima obtidos agora na internet"
+                      WebMode.NEWS -> "Manchetes recentes obtidas agora na internet"
+                      else -> "Resultados de pesquisa obtidos agora na internet"
+                  }
+                  val rule = when (mode) {
+                      WebMode.WEATHER -> "Responda de forma natural, citando a temperatura atual, a mínima, a máxima e a chance de chuva, em até 3 frases curtas."
+                      WebMode.NEWS -> "Resuma as principais manchetes em até 3 frases curtas."
+                      else -> "Responda usando as informações acima quando forem relevantes. Se elas não responderem à pergunta, diga que não encontrou e responda com cautela."
+                  }
+                  return head + " (" + now + "):\n" + ctx.text + "\n" + rule +
+                      " Fale em português do Brasil, sem listas, sem markdown e sem links.\nPergunta do usuário: " + question
+              }
+
+              suspend fun fetch(mode: WebMode, raw: String, savedCity: String, log: (String) -> Unit): WebCtx? {
+                  return withTimeout(16000L) {
+                      when (mode) {
+                          WebMode.WEATHER -> weatherCtx(raw, savedCity, log)
+                          WebMode.NEWS -> newsCtx(raw, log)
+                          WebMode.GENERAL -> generalCtx(raw, log)
+                          WebMode.NONE -> null
+                      }
+                  }
+              }
+
+              // ---------- rede ----------
+
+              private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+
+              private fun http(url: String, method: String = "GET", body: String? = null, ua: String = UA, accept: String = "*/*"): String {
+                  var u = url
+                  var m = method
+                  var b = body
+                  for (hop in 0..5) {
+                      val c = URL(u).openConnection() as HttpURLConnection
+                      try {
+                          c.instanceFollowRedirects = false
+                          c.connectTimeout = 7000
+                          c.readTimeout = 9000
+                          c.requestMethod = m
+                          c.setRequestProperty("User-Agent", ua)
+                          c.setRequestProperty("Accept", accept)
+                          c.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.5")
+                          val payload = b
+                          if (payload != null) {
+                              c.doOutput = true
+                              c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                              val bytes = payload.toByteArray(Charsets.UTF_8)
+                              c.outputStream.use { os -> os.write(bytes) }
+                          }
+                          val rc = c.responseCode
+                          if (rc in 300..399) {
+                              val loc = c.getHeaderField("Location") ?: throw RuntimeException("redirecionamento sem destino")
+                              u = URL(URL(u), loc).toString()
+                              m = "GET"
+                              b = null
+                              continue
+                          }
+                          if (rc != 200) throw RuntimeException("HTTP " + rc)
+                          val sb = StringBuilder()
+                          val buf = CharArray(8192)
+                          c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                              while (sb.length < 600000) {
+                                  val k = r.read(buf)
+                                  if (k < 0) break
+                                  sb.append(buf, 0, k)
+                              }
+                          }
+                          return sb.toString()
+                      } finally {
+                          c.disconnect()
+                      }
+                  }
+                  throw RuntimeException("redirecionamentos demais")
+              }
+
+              private fun clean(s: String): String {
+                  val noTags = s.replace(Regex("(?is)<script.*?</script>|<style.*?</style>"), " ").replace(Regex("<[^>]*>"), " ")
+                  return Html.fromHtml(noTags, Html.FROM_HTML_MODE_LEGACY).toString()
+                      .replace("\uFFFC", "").replace('\u00A0', ' ').replace(Regex("\\s+"), " ").trim()
+              }
+
+              private fun runSrc(name: String, log: (String) -> Unit, f: () -> List<WebHit>): List<WebHit> {
+                  return try {
+                      val r = f()
+                      log("Pesquisa " + name + ": " + r.size + " resultado(s)")
+                      r
+                  } catch (t: Throwable) {
+                      log("Pesquisa " + name + " falhou: " + t.javaClass.simpleName + ": " + t.message)
+                      emptyList()
+                  }
+              }
+
+              private fun fmt(hits: List<WebHit>, startIdx: Int, snipMax: Int): String {
+                  val sb = StringBuilder()
+                  var i = startIdx
+                  for (h in hits) {
+                      i++
+                      sb.append(i).append(". ").append(h.title)
+                      if (h.snippet.isNotEmpty()) sb.append(": ").append(h.snippet.take(snipMax))
+                      if (h.source.isNotEmpty()) sb.append(" (").append(h.source).append(")")
+                      sb.append("\n")
+                  }
+                  return sb.toString()
+              }
+
+              // ---------- buscadores ----------
+
+              private fun ddg(q: String): List<WebHit> {
+                  val html = http("https://html.duckduckgo.com/html/", "POST", "q=" + enc(q) + "&kl=br-pt", UA, "text/html")
+                  val reA = Regex("(<a\\b[^>]*class=\"[^\"]*result__a[^\"]*\"[^>]*>)(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                  val reS = Regex("<a\\b[^>]*class=\"[^\"]*result__snippet[^\"]*\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                  val reH = Regex("href=\"([^\"]*)\"")
+                  val ms = reA.findAll(html).toList()
+                  val out = ArrayList<WebHit>()
+                  for (i in ms.indices) {
+                      val m = ms[i]
+                      var href = (reH.find(m.groupValues[1])?.groupValues?.get(1) ?: "").replace("&amp;", "&")
+                      if (href.contains("duckduckgo.com/y.js") || href.contains("ad_provider") || href.contains("ad_domain")) continue
+                      val uddg = Regex("uddg=([^&]+)").find(href)
+                      if (uddg != null) {
+                          href = try {
+                              URLDecoder.decode(uddg.groupValues[1], "UTF-8")
+                          } catch (t: Throwable) {
+                              href
+                          }
+                      }
+                      if (href.startsWith("//")) href = "https:" + href
+                      val endPos = if (i + 1 < ms.size) ms[i + 1].range.first else html.length
+                      val startPos = m.range.last + 1
+                      val region = if (startPos < endPos) html.substring(startPos, endPos) else ""
+                      val sn = reS.find(region)?.let { clean(it.groupValues[1]) } ?: ""
+                      val title = clean(m.groupValues[2])
+                      if (title.isEmpty()) continue
+                      val host = try {
+                          URL(href).host.removePrefix("www.")
+                      } catch (t: Throwable) {
+                          ""
+                      }
+                      out.add(WebHit(title, sn, host))
+                      if (out.size >= 6) break
+                  }
+                  return out
+              }
+
+              private fun bing(q: String): List<WebHit> {
+                  val html = http("https://www.bing.com/search?q=" + enc(q) + "&setlang=pt-BR&cc=BR", "GET", null, UA, "text/html")
+                  val reT = Regex("<h2[^>]*>\\s*<a[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                  val reP = Regex("<p[^>]*>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
+                  val out = ArrayList<WebHit>()
+                  val blocks = html.split("<li class=\"b_algo\"")
+                  for (i in 1 until blocks.size) {
+                      val b = blocks[i].substringBefore("</li>")
+                      val t = reT.find(b)
+                      val p = reP.find(b)
+                      val title = if (t != null) clean(t.groupValues[1]) else ""
+                      val sn = if (p != null) clean(p.groupValues[1]) else ""
+                      if (title.isNotEmpty() && sn.isNotEmpty()) out.add(WebHit(title, sn, "Bing"))
+                      if (out.size >= 6) break
+                  }
+                  return out
+              }
+
+              private fun wiki(q: String): List<WebHit> {
+                  val url = "https://pt.wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrlimit=3&gsrsearch=" + enc(q) +
+                      "&prop=extracts&exintro=1&explaintext=1&exsentences=4&exlimit=3&redirects=1"
+                  val j = JSONObject(http(url, "GET", null, API_UA, "application/json"))
+                  val pages = j.optJSONObject("query")?.optJSONObject("pages") ?: return emptyList()
+                  val tmp = ArrayList<Pair<Int, WebHit>>()
+                  val keys = pages.keys()
+                  while (keys.hasNext()) {
+                      val k = keys.next()
+                      val p = pages.getJSONObject(k)
+                      val ex = p.optString("extract", "").trim()
+                      if (ex.isEmpty()) continue
+                      tmp.add(Pair(p.optInt("index", 99), WebHit(p.optString("title", ""), ex.take(700), "Wikipédia")))
+                  }
+                  tmp.sortBy { it.first }
+                  val out = ArrayList<WebHit>()
+                  for (p in tmp) out.add(p.second)
+                  return out
+              }
+
+              private fun tagText(block: String, tag: String): String {
+                  val m = Regex("<" + tag + "(?:\\s[^>]*)?>(.*?)</" + tag + ">", RegexOption.DOT_MATCHES_ALL).find(block) ?: return ""
+                  return clean(m.groupValues[1].replace("<![CDATA[", "").replace("]]>", ""))
+              }
+
+              private fun news(topic: String): List<WebHit> {
+                  val url = if (topic.isBlank()) "https://news.google.com/rss?hl=pt-BR&gl=BR&ceid=BR:pt-419"
+                  else "https://news.google.com/rss/search?q=" + enc(topic) + "&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+                  val xml = http(url, "GET", null, API_UA, "application/rss+xml,application/xml,text/xml")
+                  val out = ArrayList<WebHit>()
+                  val itemRe = Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL)
+                  for (m in itemRe.findAll(xml)) {
+                      val blk = m.groupValues[1]
+                      var title = tagText(blk, "title")
+                      val src = tagText(blk, "source")
+                      val date = tagText(blk, "pubDate").take(16)
+                      if (src.isNotEmpty() && title.endsWith(" - " + src)) title = title.removeSuffix(" - " + src)
+                      if (title.isNotEmpty()) {
+                          val meta = (if (src.isNotEmpty()) src else "") + (if (date.isNotEmpty()) ", " + date else "")
+                          out.add(WebHit(title, "", meta))
+                      }
+                      if (out.size >= 6) break
+                  }
+                  return out
+              }
+
+              // ---------- montagem do contexto ----------
+
+              private suspend fun generalCtx(raw: String, log: (String) -> Unit): WebCtx? {
+                  val q = cleanQuery(raw)
+                  val nq = leadRe.replace(norm(raw), "")
+                  val definitional = defRe.containsMatchIn(nq)
+                  return coroutineScope {
+                      val webD = async(Dispatchers.IO) { runSrc("DuckDuckGo", log) { ddg(q) } }
+                      val wikiD = async(Dispatchers.IO) {
+                          if (definitional) runSrc("Wikipédia", log) { wiki(q) } else emptyList<WebHit>()
+                      }
+                      var hits = webD.await()
+                      if (hits.isEmpty()) hits = withContext(Dispatchers.IO) { runSrc("Bing", log) { bing(q) } }
+                      var wk = wikiD.await()
+                      if (hits.isEmpty() && wk.isEmpty() && !definitional) {
+                          wk = withContext(Dispatchers.IO) { runSrc("Wikipédia", log) { wiki(q) } }
+                      }
+                      if (hits.isEmpty() && wk.isEmpty()) {
+                          null
+                      } else {
+                          val sb = StringBuilder()
+                          val firstWiki = wk.take(1)
+                          sb.append(fmt(firstWiki, 0, 700))
+                          sb.append(fmt(hits.take(4), firstWiki.size, 320))
+                          WebCtx(sb.toString().take(MAX_CHARS), null)
+                      }
+                  }
+              }
+
+              private suspend fun newsCtx(raw: String, log: (String) -> Unit): WebCtx? {
+                  val topic = newsTopic(raw)
+                  val hits = withContext(Dispatchers.IO) { runSrc("Google Notícias", log) { news(topic) } }
+                  if (hits.isEmpty()) return null
+                  val head = if (topic.isBlank()) "Principais manchetes do Brasil:\n" else "Manchetes sobre " + topic + ":\n"
+                  return WebCtx((head + fmt(hits.take(5), 0, 0)).take(MAX_CHARS), null)
+              }
+
+              private fun wmo(c: Int): String = when (c) {
+                  0 -> "céu limpo"
+                  1 -> "predominantemente limpo"
+                  2 -> "parcialmente nublado"
+                  3 -> "nublado"
+                  45, 48 -> "neblina"
+                  51, 53, 55 -> "garoa"
+                  56, 57 -> "garoa congelante"
+                  61 -> "chuva fraca"
+                  63 -> "chuva moderada"
+                  65 -> "chuva forte"
+                  66, 67 -> "chuva congelante"
+                  71, 73, 75, 77 -> "neve"
+                  80 -> "pancadas de chuva fracas"
+                  81 -> "pancadas de chuva moderadas"
+                  82 -> "pancadas de chuva fortes"
+                  85, 86 -> "pancadas de neve"
+                  95 -> "tempestade"
+                  96, 99 -> "tempestade com granizo"
+                  else -> "tempo indefinido"
+              }
+
+              private fun rd(d: Double): String = Math.round(d).toString()
+
+              private fun ipLocation(log: (String) -> Unit): Triple<Double, Double, String>? {
+                  try {
+                      val j = JSONObject(http("https://ipwho.is/", "GET", null, API_UA, "application/json"))
+                      if (j.optBoolean("success", false)) {
+                          return Triple(j.getDouble("latitude"), j.getDouble("longitude"), j.optString("city", "") + ", " + j.optString("region", ""))
+                      }
+                  } catch (t: Throwable) {
+                      log("IP (ipwho.is) falhou: " + t.message)
+                  }
+                  try {
+                      val j = JSONObject(http("https://get.geojs.io/v1/ip/geo.json", "GET", null, API_UA, "application/json"))
+                      return Triple(j.getString("latitude").toDouble(), j.getString("longitude").toDouble(), j.optString("city", "") + ", " + j.optString("region", ""))
+                  } catch (t: Throwable) {
+                      log("IP (geojs) falhou: " + t.message)
+                  }
+                  return null
+              }
+
+              private suspend fun weatherCtx(raw: String, savedCity: String, log: (String) -> Unit): WebCtx? {
+                  return withContext(Dispatchers.IO) {
+                      val explicit = cityFrom(raw)
+                      val cityQ = if (explicit.isNotEmpty()) explicit else savedCity
+                      var lat = 0.0
+                      var lon = 0.0
+                      var label = ""
+                      var ok = false
+                      var estimated = false
+                      if (cityQ.isNotEmpty()) {
+                          try {
+                              val g = JSONObject(http("https://geocoding-api.open-meteo.com/v1/search?name=" + enc(cityQ) + "&count=1&language=pt&format=json", "GET", null, API_UA, "application/json"))
+                              val arr = g.optJSONArray("results")
+                              if (arr != null && arr.length() > 0) {
+                                  val o = arr.getJSONObject(0)
+                                  lat = o.getDouble("latitude")
+                                  lon = o.getDouble("longitude")
+                                  val adm = o.optString("admin1", "")
+                                  label = o.optString("name", cityQ) + (if (adm.isNotEmpty()) ", " + adm else "") + ", " + o.optString("country", "")
+                                  ok = true
+                              }
+                          } catch (t: Throwable) {
+                              log("Geocodificação falhou: " + t.message)
+                          }
+                      }
+                      if (!ok) {
+                          val ip = ipLocation(log)
+                          if (ip != null) {
+                              lat = ip.first
+                              lon = ip.second
+                              label = ip.third
+                              ok = true
+                              estimated = true
+                          }
+                      }
+                      if (!ok) return@withContext null
+                      val url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
+                          "&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m" +
+                          "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
+                          "&timezone=auto&forecast_days=3"
+                      val j = JSONObject(http(url, "GET", null, API_UA, "application/json"))
+                      val cur = j.getJSONObject("current")
+                      val d = j.getJSONObject("daily")
+                      val sb = StringBuilder()
+                      sb.append("Local: " + label + (if (estimated) " (local estimado pelo IP do celular)" else "") + ".\n")
+                      sb.append("Agora: " + rd(cur.getDouble("temperature_2m")) + " graus, sensação de " + rd(cur.getDouble("apparent_temperature")) +
+                          " graus, " + wmo(cur.optInt("weather_code", -1)) + ", umidade de " + rd(cur.optDouble("relative_humidity_2m", 0.0)) +
+                          " por cento, vento de " + rd(cur.optDouble("wind_speed_10m", 0.0)) + " quilômetros por hora.\n")
+                      val codes = d.getJSONArray("weather_code")
+                      val tmax = d.getJSONArray("temperature_2m_max")
+                      val tmin = d.getJSONArray("temperature_2m_min")
+                      val pp = d.optJSONArray("precipitation_probability_max")
+                      val names = listOf("Hoje", "Amanhã", "Depois de amanhã")
+                      val n = minOf(3, codes.length(), tmax.length(), tmin.length())
+                      for (i in 0 until n) {
+                          var line = names[i] + ": mínima de " + rd(tmin.getDouble(i)) + ", máxima de " + rd(tmax.getDouble(i)) + " graus, " + wmo(codes.optInt(i, -1))
+                          if (pp != null) {
+                              val pr = pp.optDouble(i, -1.0)
+                              if (pr >= 0.0) line += ", chance de chuva de " + rd(pr) + " por cento"
+                          }
+                          sb.append(line).append(".\n")
+                      }
+                      WebCtx(sb.toString(), if (explicit.isNotEmpty()) explicit else null)
+                  }
+              }
+          }
 
           class OrbView(ctx: Context) : View(ctx) {
               var state = St.IDLE
@@ -323,6 +764,7 @@ jobs:
               private lateinit var modelRg: RadioGroup
               private lateinit var contSw: Switch
               private lateinit var wakeSw: Switch
+              private lateinit var webSw: Switch
               private lateinit var personaEt: EditText
 
               @Volatile private var state = St.IDLE
@@ -337,6 +779,8 @@ jobs:
               @Volatile private var ready = false
               @Volatile private var loading = false
               private var turns = 0
+              private var convChars = 0
+              private var tempModel: String? = null
               private var busy = false
               private var downloading = false
               private var dlModel: ModelInfo? = null
@@ -365,7 +809,7 @@ jobs:
               private fun gb(k: String, d: Boolean): Boolean = prefs.getBoolean(k, d)
               private fun gf(k: String, d: Float): Float = prefs.getFloat(k, d)
               private fun assistantName(): String = gs("name", "Jarvis")
-              private fun curModel(): ModelInfo = MODELS.firstOrNull { it.id == gs("model", "gemma") } ?: MODELS[0]
+              private fun curModel(): ModelInfo = MODELS.firstOrNull { it.id == (tempModel ?: gs("model", "llama")) } ?: MODELS[0]
               private fun modelFile(m: ModelInfo): File = File(File(filesDir, "models"), m.file)
               private fun hasModel(m: ModelInfo): Boolean {
                   val f = modelFile(m)
@@ -441,6 +885,9 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   prefs = getSharedPreferences("jarvis", MODE_PRIVATE)
+                  if (!gb("mig_llama_v2", false)) {
+                      prefs.edit().putString("model", "llama").putBoolean("mig_llama_v2", true).apply()
+                  }
                   window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                   val old = Thread.getDefaultUncaughtExceptionHandler()
                   Thread.setDefaultUncaughtExceptionHandler { t, e ->
@@ -451,7 +898,7 @@ jobs:
                       old?.uncaughtException(t, e)
                   }
                   buildUi()
-                  logd("Jarvis Local v1 | " + Build.MANUFACTURER + " " + Build.MODEL + " | Android " + Build.VERSION.RELEASE +
+                  logd("Jarvis Local v2 | " + Build.MANUFACTURER + " " + Build.MODEL + " | Android " + Build.VERSION.RELEASE +
                       " (API " + Build.VERSION.SDK_INT + ") | ABI " + Build.SUPPORTED_ABIS.joinToString())
                   logd(memInfo())
                   reportPreviousExit()
@@ -487,7 +934,7 @@ jobs:
               override fun onTrimMemory(level: Int) {
                   super.onTrimMemory(level)
                   logd("onTrimMemory nível " + level + " | " + memInfo())
-                  if (level >= 15 && engineModel == "gemma" && !busy && ready) {
+                  if (level >= 15 && isHeavy(engineModel) && !busy && ready) {
                       switchToQwen("o sistema está com pouca memória")
                   }
               }
@@ -540,14 +987,15 @@ jobs:
                   if (pb.isEmpty()) return
                   logd("ATENÇÃO: o app caiu enquanto carregava/testava o motor em '" + pb + "'.")
                   if (pb == "gpu") {
-                      prefs.edit().putBoolean("bad_gpu", true).putString("backend", "cpu").putString("pending_be", "").commit()
+                      prefs.edit().putBoolean("bad_gpu", true).putString(beKey(curModel()), "cpu").putString("pending_be", "").commit()
                       logd("GPU marcada como instável. Vou usar a CPU. (Ajustes > Refazer teste limpa isso.)")
                   } else {
                       prefs.edit().putString("pending_be", "").commit()
-                      if (curModel().id == "gemma") {
+                      if (isHeavy(curModel().id)) {
+                          val lbl = curModel().label
                           prefs.edit().putString("model", "qwen").commit()
-                          notice = "Reiniciei porque o Gemma derrubou o aplicativo. Troquei para o modelo leve Qwen."
-                          logd("Gemma derrubou o app na CPU. Troca para Qwen.")
+                          notice = "Reiniciei porque o modelo " + lbl + " derrubou o aplicativo. Troquei para o modelo leve Qwen. Você pode tentar o modelo maior de novo nos ajustes."
+                          logd(lbl + " derrubou o app na CPU. Troca para Qwen.")
                       }
                   }
               }
@@ -737,6 +1185,12 @@ jobs:
                   wakeSw.isChecked = gb("wake", false)
                   col.addView(wakeSw, lp(MATCH, WRAP, 10))
 
+                  webSw = Switch(this)
+                  webSw.text = "Pesquisar na internet quando precisar"
+                  webSw.setTextColor(0xFFE0F7FF.toInt())
+                  webSw.isChecked = gb("web", true)
+                  col.addView(webSw, lp(MATCH, WRAP, 10))
+
                   col.addView(label("Personalidade (prompt de sistema; {nome} vira o nome)"))
                   personaEt = edit(gs("persona", DEFAULT_PERSONA), true)
                   col.addView(personaEt)
@@ -751,7 +1205,7 @@ jobs:
                       }
                   }, lp(MATCH, WRAP, 10))
                   col.addView(btn("Refazer teste GPU/CPU") {
-                      prefs.edit().remove("backend").remove("bad_gpu").apply()
+                      prefs.edit().remove(beKey(curModel())).remove("bad_gpu").apply()
                       showSettings(false)
                       loadModel(true)
                   }, lp(MATCH, WRAP, 10))
@@ -780,7 +1234,7 @@ jobs:
                           val rb = modelRg.findViewById<RadioButton>(1000 + idx)
                           rb.text = m.label + (if (hasModel(m)) "  (baixado)" else "  (não baixado, ~" + fmtBytes(m.approx) + ")")
                       }
-                      modelRg.check(1000 + MODELS.indexOf(curModel()))
+                      modelRg.check(1000 + MODELS.indexOf(MODELS.firstOrNull { it.id == gs("model", "llama") } ?: MODELS[0]))
                   } else {
                       val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
                       imm.hideSoftInputFromWindow(root.windowToken, 0)
@@ -791,13 +1245,16 @@ jobs:
               private fun saveSettings() {
                   val newName = nameEt.text.toString().trim().ifEmpty { "Jarvis" }
                   val rate = 0.5f + rateSb.progress / 100f
-                  val oldModel = gs("model", "gemma")
+                  val oldModel = gs("model", "llama")
                   val newModel = MODELS[max(0, modelRg.checkedRadioButtonId - 1000)].id
+                  val hadTemp = tempModel
+                  tempModel = null
                   prefs.edit()
                       .putString("name", newName)
                       .putFloat("rate", rate)
                       .putBoolean("cont", contSw.isChecked)
                       .putBoolean("wake", wakeSw.isChecked)
+                      .putBoolean("web", webSw.isChecked)
                       .putString("persona", personaEt.text.toString().ifBlank { DEFAULT_PERSONA })
                       .putString("model", newModel)
                       .apply()
@@ -805,7 +1262,7 @@ jobs:
                   tts?.setSpeechRate(rate)
                   resetPending = true
                   showSettings(false)
-                  if (newModel != oldModel) loadModelOrOffer()
+                  if (newModel != oldModel || (hadTemp != null && hadTemp != newModel)) loadModelOrOffer()
               }
 
               private fun buildLog(): LinearLayout {
@@ -1493,7 +1950,7 @@ jobs:
                   l.add(Pair(true, u))
                   l.add(Pair(false, a))
                   val sb = StringBuilder()
-                  for (p in l.takeLast(8)) {
+                  for (p in l.takeLast(12)) {
                       sb.append(if (p.first) "U " else "A ").append(p.second.replace("\n", " ").take(300)).append("\n")
                   }
                   prefs.edit().putString("hist", sb.toString().trimEnd()).apply()
@@ -1511,7 +1968,8 @@ jobs:
               private fun buildSystemPrompt(): String {
                   val persona = gs("persona", DEFAULT_PERSONA).replace("{nome}", assistantName())
                   val n = notes()
-                  return persona + (if (n.isEmpty()) "" else "\nFatos que o usuário pediu para você lembrar: " + n.joinToString("; ") + ".")
+                  return persona + (if (n.isEmpty()) "" else "\nFatos que o usuário pediu para você lembrar: " + n.joinToString("; ") + ".") +
+                      "\nData e hora atuais: " + nowStr() + ". Você tem acesso à internet: quando a mensagem do usuário trouxer resultados de pesquisa, baseie-se neles e não invente fatos. Se não tiver certeza, diga que não sabe."
               }
 
               private fun makeConfig(m: ModelInfo, f: File, be: String): EngineConfig {
@@ -1564,10 +2022,10 @@ jobs:
                   scope.launch {
                       try {
                           releaseEngine()
-                          var be = gs("backend", "")
+                          var be = gs(beKey(m), "")
                           if (be.isEmpty() || forceBench) {
                               be = benchmark(m, f)
-                              prefs.edit().putString("backend", be).apply()
+                              prefs.edit().putString(beKey(m), be).apply()
                           }
                           var ok = startEngine(m, f, be)
                           if (!ok) {
@@ -1575,12 +2033,12 @@ jobs:
                               if (!(other == "gpu" && gb("bad_gpu", false))) {
                                   logd("Falhou com " + be + "; tentando " + other)
                                   ok = startEngine(m, f, other)
-                                  if (ok) prefs.edit().putString("backend", other).apply()
+                                  if (ok) prefs.edit().putString(beKey(m), other).apply()
                               }
                           }
                           if (!ok) {
-                              if (m.id == "gemma") {
-                                  ui.postDelayed({ switchToQwen("o Gemma não conseguiu iniciar") }, 500)
+                              if (isHeavy(m.id)) {
+                                  ui.postDelayed({ switchToQwen("o modelo " + m.label + " não conseguiu iniciar", true) }, 500)
                               } else {
                                   setStatus("Não consegui iniciar o modelo. Abra o Log e copie o texto.")
                               }
@@ -1674,9 +2132,9 @@ jobs:
                   }
               }
 
-              private fun getConversation(): Conversation {
+              private fun getConversation(extra: Int): Conversation {
                   val old = conversation
-                  if (old != null && turns < 10 && !resetPending) return old
+                  if (old != null && turns < 12 && convChars + extra < 7000 && !resetPending) return old
                   try {
                       old?.close()
                   } catch (t: Throwable) {
@@ -1684,32 +2142,62 @@ jobs:
                   conversation = null
                   resetPending = false
                   val e = engine ?: throw IllegalStateException("motor não iniciado")
+                  val hist = ArrayList<Pair<Boolean, String>>()
+                  for (h in loadHistory().takeLast(8)) {
+                      if (hist.isEmpty() && !h.first) continue
+                      if (hist.isNotEmpty() && hist[hist.size - 1].first == h.first) hist.removeAt(hist.size - 1)
+                      hist.add(h)
+                  }
+                  if (hist.isNotEmpty() && hist[hist.size - 1].first) hist.removeAt(hist.size - 1)
                   val initMsgs = ArrayList<Message>()
-                  for (h in loadHistory().takeLast(6)) {
+                  var histChars = 0
+                  for (h in hist) {
+                      histChars += h.second.length
                       if (h.first) initMsgs.add(Message.user(h.second)) else initMsgs.add(Message.model(h.second))
                   }
                   turns = 0
-                  val sampler = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.7)
-                  val sys = Contents.of(buildSystemPrompt())
+                  val llama = engineModel == "llama"
+                  val sampler = SamplerConfig(topK = 40, topP = 0.95, temperature = if (llama) 0.5 else 0.7)
+                  val sysText = buildSystemPrompt()
+                  val sys = Contents.of(sysText)
+                  convChars = sysText.length + histChars
                   var conv: Conversation
-                  try {
-                      conv = e.createConversation(ConversationConfig(
-                          systemInstruction = sys,
-                          initialMessages = initMsgs,
-                          samplerConfig = sampler,
-                          thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0),
-                          maxOutputToken = 400
-                      ))
-                  } catch (t: Throwable) {
-                      logd("Conversa com 'thinking' falhou (" + t.message + "); tentando sem.")
-                      conv = e.createConversation(ConversationConfig(
-                          systemInstruction = sys,
-                          initialMessages = initMsgs,
-                          samplerConfig = sampler
-                      ))
+                  if (llama) {
+                      try {
+                          conv = e.createConversation(ConversationConfig(
+                              systemInstruction = sys,
+                              initialMessages = initMsgs,
+                              samplerConfig = sampler,
+                              maxOutputToken = 400
+                          ))
+                      } catch (t: Throwable) {
+                          logd("Conversa com limite de saída falhou (" + t.message + "); tentando sem.")
+                          conv = e.createConversation(ConversationConfig(
+                              systemInstruction = sys,
+                              initialMessages = initMsgs,
+                              samplerConfig = sampler
+                          ))
+                      }
+                  } else {
+                      try {
+                          conv = e.createConversation(ConversationConfig(
+                              systemInstruction = sys,
+                              initialMessages = initMsgs,
+                              samplerConfig = sampler,
+                              thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0),
+                              maxOutputToken = 400
+                          ))
+                      } catch (t: Throwable) {
+                          logd("Conversa com 'thinking' falhou (" + t.message + "); tentando sem.")
+                          conv = e.createConversation(ConversationConfig(
+                              systemInstruction = sys,
+                              initialMessages = initMsgs,
+                              samplerConfig = sampler
+                          ))
+                      }
                   }
                   conversation = conv
-                  logd("Nova conversa criada (histórico: " + initMsgs.size + " msgs)")
+                  logd("Nova conversa criada (histórico: " + initMsgs.size + " msgs, ~" + convChars + " caracteres)")
                   return conv
               }
 
@@ -1724,14 +2212,57 @@ jobs:
                   setState(St.THINKING)
                   val tStart = System.currentTimeMillis()
                   scope.launch {
+                      var prompt = text
+                      var directMsg: String? = null
+                      val mode = if (gb("web", true)) JarvisWeb.decide(JarvisWeb.norm(text), JarvisWeb.norm(assistantName())) else WebMode.NONE
+                      if (mode != WebMode.NONE) {
+                          val strict = mode == WebMode.WEATHER || mode == WebMode.NEWS
+                          if (!isOnline()) {
+                              logd("Sem internet; pesquisa ignorada (" + mode + ")")
+                              if (strict) directMsg = "Estou sem conexão com a internet agora, então não consigo consultar isso."
+                              else prompt = NO_WEB_NOTE + text
+                          } else {
+                              setStatus("Pesquisando na internet…")
+                              logd("Pesquisa web [" + mode + "]: " + text)
+                              val t0 = System.currentTimeMillis()
+                              var ctx: WebCtx? = null
+                              try {
+                                  ctx = JarvisWeb.fetch(mode, text, gs("city", "")) { m -> logd(m) }
+                              } catch (t: TimeoutCancellationException) {
+                                  logd("Pesquisa demorou demais.")
+                              } catch (t: CancellationException) {
+                                  throw t
+                              } catch (t: Throwable) {
+                                  logd("Pesquisa falhou: " + t.javaClass.simpleName + ": " + t.message)
+                              }
+                              val c = ctx
+                              logd("Pesquisa terminou em " + (System.currentTimeMillis() - t0) + " ms | " +
+                                  (if (c != null) c.text.length.toString() + " caracteres" else "sem resultado"))
+                              if (c != null) {
+                                  prompt = JarvisWeb.wrap(c, text, mode, nowStr())
+                                  val city = c.city
+                                  if (city != null) prefs.edit().putString("city", city).apply()
+                              } else if (strict) {
+                                  directMsg = "Não consegui buscar essa informação na internet agora."
+                              } else {
+                                  prompt = NO_WEB_NOTE + text
+                              }
+                              setStatus("Pensando…")
+                          }
+                      }
+                      val dm = directMsg
+                      if (dm != null) {
+                          runOnUiThread { reply(dm) }
+                          return@launch
+                      }
                       val raw = StringBuilder()
                       val sbuf = StringBuilder()
                       var shown = ""
                       var chars = 0
                       var failed: Throwable? = null
                       try {
-                          val conv = getConversation()
-                          conv.sendMessageAsync(text).collect { m ->
+                          val conv = getConversation(prompt.length)
+                          conv.sendMessageAsync(prompt).collect { m ->
                               raw.append(m.toString())
                               val vis = visibleText(raw.toString())
                               if (vis.length > shown.length && vis.startsWith(shown)) {
@@ -1760,10 +2291,13 @@ jobs:
                           } catch (t: Throwable) {
                           }
                           conversation = null
+                          prefs.edit().remove("hist").apply()
+                          logd("Histórico salvo descartado para a próxima tentativa começar limpa.")
                       } else {
                           turns++
+                          convChars += prompt.length + shown.length
                           lastTps = (chars / 3.2) / max(secs, 0.1)
-                          addHistory(text, shown)
+                          if (shown.isNotBlank()) addHistory(text, shown)
                       }
                       val finalText = shown
                       runOnUiThread {
@@ -1783,24 +2317,36 @@ jobs:
               }
 
               private fun healthCheck() {
-                  if (engineModel != "gemma") return
+                  if (!isHeavy(engineModel)) return
                   val th = thermal()
                   val av = availMb()
                   if (th >= 3) switchToQwen("o celular está esquentando demais")
                   else if (av < 500) switchToQwen("a memória está acabando")
               }
 
-              private fun switchToQwen(reason: String) {
+              private fun switchToQwen(reason: String, persist: Boolean = false) {
                   if (curModel().id == "qwen") {
                       setStatus("Problema: " + reason + ". Veja o Log.")
                       return
                   }
-                  val q = MODELS[1]
-                  prefs.edit().putString("model", "qwen").apply()
-                  logd("TROCA AUTOMÁTICA para Qwen3 0.6B: " + reason)
-                  toast("Troquei para o modelo leve (Qwen3 0.6B): " + reason)
-                  notice = "Troquei para o modelo leve Qwen, porque " + reason + ". Você pode voltar ao Gemma nos ajustes."
+                  val q = MODELS.first { it.id == "qwen" }
+                  if (persist) prefs.edit().putString("model", "qwen").apply() else tempModel = "qwen"
+                  logd("TROCA AUTOMÁTICA para " + q.label + ": " + reason + (if (persist) "" else " (só nesta sessão)"))
+                  toast("Troquei para o modelo leve (" + q.label + "): " + reason)
+                  notice = "Troquei para o modelo leve, porque " + reason + ". Você pode voltar ao modelo maior nos ajustes."
                   if (hasModel(q)) loadModel() else offerDownload(q)
+              }
+
+              private fun beKey(m: ModelInfo): String = "backend_" + m.id
+
+              private fun nowStr(): String =
+                  SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy, HH:mm", Locale("pt", "BR")).format(Date())
+
+              private fun isOnline(): Boolean {
+                  val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                  val net = cm.activeNetwork ?: return false
+                  val nc = cm.getNetworkCapabilities(net) ?: return false
+                  return nc.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
               }
 
               private fun isWifi(): Boolean {
