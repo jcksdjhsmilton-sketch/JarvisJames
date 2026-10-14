@@ -666,6 +666,88 @@ jobs:
               }
           }
 
+          object JarvisCloud {
+              private fun baseUrl(raw: String): String {
+                  var b = raw.trim().trimEnd('/')
+                  if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b
+                  return b
+              }
+
+              private fun open(base: String, path: String, key: String, method: String, connectMs: Int, readMs: Int): HttpURLConnection {
+                  val c = URL(baseUrl(base) + path).openConnection() as HttpURLConnection
+                  c.connectTimeout = connectMs
+                  c.readTimeout = readMs
+                  c.requestMethod = method
+                  c.setRequestProperty("X-API-Key", key.trim())
+                  c.setRequestProperty("ngrok-skip-browser-warning", "1")
+                  c.setRequestProperty("Accept-Encoding", "identity")
+                  c.setRequestProperty("User-Agent", "JarvisApp/2.0")
+                  return c
+              }
+
+              fun health(base: String, key: String): Boolean {
+                  val c = open(base, "/health", key, "GET", 8000, 15000)
+                  try {
+                      if (c.responseCode != 200) return false
+                      val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { r -> r.readText() }
+                      return JSONObject(body).optBoolean("ok", false)
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+
+              fun stream(base: String, key: String, system: String, hist: List<Pair<Boolean, String>>, message: String, maxTokens: Int, onPiece: (String) -> Unit) {
+                  val body = JSONObject()
+                  body.put("system", system)
+                  val arr = org.json.JSONArray()
+                  for (h in hist) {
+                      val o = JSONObject()
+                      o.put("role", if (h.first) "user" else "assistant")
+                      o.put("content", h.second)
+                      arr.put(o)
+                  }
+                  body.put("history", arr)
+                  body.put("message", message)
+                  body.put("max_new_tokens", maxTokens)
+                  body.put("temperature", 0.7)
+                  val c = open(base, "/chat", key, "POST", 10000, 120000)
+                  try {
+                      c.doOutput = true
+                      c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                      c.setRequestProperty("Accept", "text/event-stream")
+                      val bytes = body.toString().toByteArray(Charsets.UTF_8)
+                      c.outputStream.use { os -> os.write(bytes) }
+                      val rc = c.responseCode
+                      if (rc != 200) {
+                          var err = ""
+                          try {
+                              err = c.errorStream?.bufferedReader(Charsets.UTF_8)?.use { r -> r.readText() }?.take(200) ?: ""
+                          } catch (t: Throwable) {
+                          }
+                          throw RuntimeException("HTTP " + rc + " " + err)
+                      }
+                      var gotDone = false
+                      c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                          while (true) {
+                              val line = r.readLine() ?: break
+                              if (!line.startsWith("data:")) continue
+                              val js = JSONObject(line.substring(5).trim())
+                              if (js.has("error")) throw RuntimeException(js.optString("error"))
+                              val t = js.optString("t", "")
+                              if (t.isNotEmpty()) onPiece(t)
+                              if (js.optBoolean("done", false)) {
+                                  gotDone = true
+                                  break
+                              }
+                          }
+                      }
+                      if (!gotDone) throw RuntimeException("conexão encerrada antes do fim da resposta")
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+          }
+
           class OrbView(ctx: Context) : View(ctx) {
               var state = St.IDLE
               var level = 0f
@@ -765,6 +847,9 @@ jobs:
               private lateinit var contSw: Switch
               private lateinit var wakeSw: Switch
               private lateinit var webSw: Switch
+              private lateinit var cloudSw: Switch
+              private lateinit var cloudUrlEt: EditText
+              private lateinit var cloudKeyEt: EditText
               private lateinit var personaEt: EditText
 
               @Volatile private var state = St.IDLE
@@ -778,6 +863,7 @@ jobs:
               private var engineModel = ""
               @Volatile private var ready = false
               @Volatile private var loading = false
+              @Volatile private var cloudActive = false
               private var turns = 0
               private var convChars = 0
               private var tempModel: String? = null
@@ -1190,6 +1276,20 @@ jobs:
                   webSw.setTextColor(0xFFE0F7FF.toInt())
                   webSw.isChecked = gb("web", true)
                   col.addView(webSw, lp(MATCH, WRAP, 10))
+                  col.addView(label("Servidor na nuvem (Kaggle)"))
+                  cloudSw = Switch(this)
+                  cloudSw.text = "Usar a IA da nuvem (Gemma 2 9B)"
+                  cloudSw.setTextColor(0xFFE0F7FF.toInt())
+                  cloudSw.isChecked = gb("cloud", false)
+                  col.addView(cloudSw, lp(MATCH, WRAP, 4))
+                  cloudUrlEt = edit(gs("cloud_url", ""), false)
+                  cloudUrlEt.hint = "Link do ngrok (https://xxxx.ngrok-free.app)"
+                  cloudUrlEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                  col.addView(cloudUrlEt, lp(MATCH, WRAP, 6))
+                  cloudKeyEt = edit(gs("cloud_key", ""), false)
+                  cloudKeyEt.hint = "Chave da API (a mesma do segredo API_KEY)"
+                  cloudKeyEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  col.addView(cloudKeyEt, lp(MATCH, WRAP, 6))
 
                   col.addView(label("Personalidade (prompt de sistema; {nome} vira o nome)"))
                   personaEt = edit(gs("persona", DEFAULT_PERSONA), true)
@@ -1246,6 +1346,7 @@ jobs:
                   val newName = nameEt.text.toString().trim().ifEmpty { "Jarvis" }
                   val rate = 0.5f + rateSb.progress / 100f
                   val oldModel = gs("model", "llama")
+                  val oldCloud = gb("cloud", false).toString() + "|" + gs("cloud_url", "") + "|" + gs("cloud_key", "")
                   val newModel = MODELS[max(0, modelRg.checkedRadioButtonId - 1000)].id
                   val hadTemp = tempModel
                   tempModel = null
@@ -1255,6 +1356,9 @@ jobs:
                       .putBoolean("cont", contSw.isChecked)
                       .putBoolean("wake", wakeSw.isChecked)
                       .putBoolean("web", webSw.isChecked)
+                      .putBoolean("cloud", cloudSw.isChecked)
+                      .putString("cloud_url", cloudUrlEt.text.toString().trim())
+                      .putString("cloud_key", cloudKeyEt.text.toString().trim())
                       .putString("persona", personaEt.text.toString().ifBlank { DEFAULT_PERSONA })
                       .putString("model", newModel)
                       .apply()
@@ -1262,7 +1366,8 @@ jobs:
                   tts?.setSpeechRate(rate)
                   resetPending = true
                   showSettings(false)
-                  if (newModel != oldModel || (hadTemp != null && hadTemp != newModel)) loadModelOrOffer()
+                  val newCloud = cloudSw.isChecked.toString() + "|" + cloudUrlEt.text.toString().trim() + "|" + cloudKeyEt.text.toString().trim()
+                  if (newModel != oldModel || (hadTemp != null && hadTemp != newModel) || newCloud != oldCloud) loadModelOrOffer()
               }
 
               private fun buildLog(): LinearLayout {
@@ -1999,6 +2104,15 @@ jobs:
               }
 
               private fun loadModelOrOffer() {
+                  if (gb("cloud", false) && gs("cloud_url", "").isNotBlank()) {
+                      connectCloud()
+                      return
+                  }
+                  cloudActive = false
+                  loadLocalOrOffer()
+              }
+
+              private fun loadLocalOrOffer() {
                   val m = curModel()
                   if (hasModel(m)) {
                       loadModel()
@@ -2006,6 +2120,58 @@ jobs:
                       setStatus("Modelo " + m.label + " ainda não baixado.")
                       offerDownload(m)
                   }
+              }
+
+              private fun connectCloud() {
+                  if (loading) {
+                      logd("Já estou carregando…")
+                      return
+                  }
+                  loading = true
+                  ready = false
+                  setState(St.IDLE)
+                  setStatus("Conectando ao servidor na nuvem…")
+                  scope.launch {
+                      var ok = false
+                      try {
+                          ok = withContext(Dispatchers.IO) { JarvisCloud.health(gs("cloud_url", ""), gs("cloud_key", "")) }
+                      } catch (t: CancellationException) {
+                          throw t
+                      } catch (t: Throwable) {
+                          logd("Servidor da nuvem indisponível: " + t.javaClass.simpleName + ": " + t.message)
+                      }
+                      if (ok) {
+                          releaseEngine()
+                          cloudActive = true
+                          engineModel = "cloud"
+                          curBackend = "nuvem"
+                          ready = true
+                          loading = false
+                          logd("Conectado ao servidor na nuvem. " + memInfo())
+                          setStep("pronto (nuvem)")
+                          toast("Conectado ao servidor na nuvem")
+                          runOnUiThread {
+                              setState(St.IDLE)
+                              maybeGreet()
+                          }
+                      } else {
+                          cloudActive = false
+                          loading = false
+                          toast("Servidor da nuvem fora do ar. Usando o modelo local.")
+                          runOnUiThread { loadLocalOrOffer() }
+                      }
+                  }
+              }
+
+              private fun cloudHistory(): List<Pair<Boolean, String>> {
+                  val hist = ArrayList<Pair<Boolean, String>>()
+                  for (h in loadHistory().takeLast(8)) {
+                      if (hist.isEmpty() && !h.first) continue
+                      if (hist.isNotEmpty() && hist[hist.size - 1].first == h.first) hist.removeAt(hist.size - 1)
+                      hist.add(h)
+                  }
+                  if (hist.isNotEmpty() && hist[hist.size - 1].first) hist.removeAt(hist.size - 1)
+                  return hist
               }
 
               private fun loadModel(forceBench: Boolean = false) {
@@ -2017,6 +2183,7 @@ jobs:
                   ready = false
                   val m = curModel()
                   val f = modelFile(m)
+                  cloudActive = false
                   setState(St.IDLE)
                   setStatus("Carregando " + m.label + "… (pode levar até 1 minuto)")
                   scope.launch {
@@ -2260,23 +2427,33 @@ jobs:
                       var shown = ""
                       var chars = 0
                       var failed: Throwable? = null
-                      try {
-                          val conv = getConversation(prompt.length)
-                          conv.sendMessageAsync(prompt).collect { m ->
-                              raw.append(m.toString())
-                              val vis = visibleText(raw.toString())
-                              if (vis.length > shown.length && vis.startsWith(shown)) {
-                                  val d = vis.substring(shown.length)
-                                  shown = vis
-                                  chars += d.length
-                                  sbuf.append(d)
-                                  val sents = extractSentences(sbuf, false)
-                                  val snap = shown
-                                  runOnUiThread {
-                                      setReplyText(snap)
-                                      for (s in sents) speakSentence(s)
-                                  }
+                      fun onPiece(piece: String) {
+                          raw.append(piece)
+                          val vis = visibleText(raw.toString())
+                          if (vis.length > shown.length && vis.startsWith(shown)) {
+                              val d = vis.substring(shown.length)
+                              shown = vis
+                              chars += d.length
+                              sbuf.append(d)
+                              val sents = extractSentences(sbuf, false)
+                              val snap = shown
+                              runOnUiThread {
+                                  setReplyText(snap)
+                                  for (s in sents) speakSentence(s)
                               }
+                          }
+                      }
+                      val viaCloud = cloudActive
+                      try {
+                          if (viaCloud) {
+                              val cHist = cloudHistory()
+                              val cSys = buildSystemPrompt()
+                              withContext(Dispatchers.IO) {
+                                  JarvisCloud.stream(gs("cloud_url", ""), gs("cloud_key", ""), cSys, cHist, prompt, 400) { p -> onPiece(p) }
+                              }
+                          } else {
+                              val conv = getConversation(prompt.length)
+                              conv.sendMessageAsync(prompt).collect { m -> onPiece(m.toString()) }
                           }
                       } catch (t: Throwable) {
                           failed = t
@@ -2286,13 +2463,15 @@ jobs:
                       val fl = failed
                       if (fl != null) {
                           logd("Erro ao gerar: " + fl.javaClass.simpleName + ": " + fl.message)
-                          try {
-                              conversation?.close()
-                          } catch (t: Throwable) {
+                          if (!viaCloud) {
+                              try {
+                                  conversation?.close()
+                              } catch (t: Throwable) {
+                              }
+                              conversation = null
+                              prefs.edit().remove("hist").apply()
+                              logd("Histórico salvo descartado para a próxima tentativa começar limpa.")
                           }
-                          conversation = null
-                          prefs.edit().remove("hist").apply()
-                          logd("Histórico salvo descartado para a próxima tentativa começar limpa.")
                       } else {
                           turns++
                           convChars += prompt.length + shown.length
@@ -2303,7 +2482,7 @@ jobs:
                       runOnUiThread {
                           genDone = true
                           if (finalText.isBlank()) {
-                              reply(if (fl != null) "Tive um problema ao pensar. Veja o log de diagnóstico." else "Desculpe, não consegui formular uma resposta.")
+                              reply(if (fl != null) (if (viaCloud) "Não consegui falar com o servidor na nuvem. Vou carregar o modelo local." else "Tive um problema ao pensar. Veja o log de diagnóstico.") else "Desculpe, não consegui formular uma resposta.")
                           } else {
                               commitReply(finalText)
                               for (s in rest) speakSentence(s)
@@ -2311,6 +2490,11 @@ jobs:
                                   " s (~" + String.format(Locale.US, "%.1f", lastTps) + " tok/s) | " + memInfo())
                               healthCheck()
                               if (ttsPending == 0) finishTurn()
+                          }
+                          if (fl != null && viaCloud) {
+                              cloudActive = false
+                              logd("Nuvem falhou; voltando para o modelo local.")
+                              loadLocalOrOffer()
                           }
                       }
                   }
