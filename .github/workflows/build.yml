@@ -1,0 +1,438 @@
+name: Build Jarvis APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Criar o projeto Android inteiro
+        run: |
+          set -e
+          mkdir -p jarvis/app/src/main/kotlin/br/local/jarvis
+
+          cat > jarvis/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "JarvisLocal"
+          include(":app")
+          EOF
+
+          cat > jarvis/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.11.1" apply false
+              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+          }
+          EOF
+
+          cat > jarvis/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > jarvis/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "br.local.jarvis"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "br.local.jarvis"
+                  minSdk = 31
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+                  ndk {
+                      abiFilters.add("arm64-v8a")
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+          }
+          EOF
+
+          cat > jarvis/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="com.android.alarm.permission.SET_ALARM"/>
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN"/>
+                      <category android:name="android.intent.category.LAUNCHER"/>
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService"/>
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE"/>
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.action.RECOGNIZE_SPEECH"/>
+                  </intent>
+              </queries>
+              <application
+                  android:label="Jarvis Local"
+                  android:allowBackup="false"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <uses-native-library android:name="libvndksupport.so" android:required="false"/>
+                  <uses-native-library android:name="libOpenCL.so" android:required="false"/>
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="portrait"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          cat > jarvis/app/src/main/kotlin/br/local/jarvis/MainActivity.kt <<'EOF'
+          package br.local.jarvis
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.ActivityManager
+          import android.app.AlertDialog
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.RadialGradient
+          import android.graphics.RectF
+          import android.graphics.Shader
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.camera2.CameraCharacteristics
+          import android.hardware.camera2.CameraManager
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Debug
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.PowerManager
+          import android.provider.AlarmClock
+          import android.provider.Settings
+          import android.speech.RecognitionListener
+          import android.speech.RecognitionSupport
+          import android.speech.RecognitionSupportCallback
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import android.view.inputmethod.EditorInfo
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.RadioButton
+          import android.widget.RadioGroup
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+          import android.widget.Toast
+          import com.google.ai.edge.litertlm.*
+          import kotlinx.coroutines.*
+          import java.io.File
+          import java.io.RandomAccessFile
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.text.Normalizer
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
+          import kotlin.math.max
+          import kotlin.math.sin
+
+          enum class St { IDLE, LISTENING, THINKING, SPEAKING }
+
+          class ModelInfo(val id: String, val label: String, val file: String, val url: String, val approx: Long)
+
+          class FatalDl(m: String) : Exception(m)
+
+          val MODELS = listOf(
+              ModelInfo("gemma", "Gemma 4 E2B", "gemma-4-E2B-it.litertlm",
+                  "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm", 2_580_000_000L),
+              ModelInfo("qwen", "Qwen3 0.6B (leve)", "Qwen3-0.6B.litertlm",
+                  "https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm", 700_000_000L)
+          )
+
+          const val DEFAULT_PERSONA = "Você é {nome}, um assistente pessoal de voz inspirado no Jarvis do Homem de Ferro. " +
+              "Fale sempre em português do Brasil. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
+              "Responda em no máximo 3 frases curtas. Não use markdown, listas, emojis nem símbolos, porque suas respostas serão faladas em voz alta. " +
+              "Se não souber algo, diga com honestidade."
+
+          class OrbView(ctx: Context) : View(ctx) {
+              var state = St.IDLE
+              var level = 0f
+              private var phase = 0f
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val animator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                  duration = 2400
+                  repeatCount = android.animation.ValueAnimator.INFINITE
+                  interpolator = android.view.animation.LinearInterpolator()
+                  addUpdateListener {
+                      phase = it.animatedValue as Float
+                      invalidate()
+                  }
+              }
+
+              override fun onAttachedToWindow() {
+                  super.onAttachedToWindow()
+                  animator.start()
+              }
+
+              override fun onDetachedFromWindow() {
+                  animator.cancel()
+                  super.onDetachedFromWindow()
+              }
+
+              private fun withAlpha(c: Int, a: Int): Int = (c and 0x00FFFFFF) or (a shl 24)
+
+              override fun onDraw(c: Canvas) {
+                  val cx = width / 2f
+                  val cy = height / 2f
+                  val base = minOf(width, height) * 0.28f
+                  val col = when (state) {
+                      St.IDLE -> 0xFF00B8FF.toInt()
+                      St.LISTENING -> 0xFF00E676.toInt()
+                      St.THINKING -> 0xFFFFB300.toInt()
+                      St.SPEAKING -> 0xFF40C4FF.toInt()
+                  }
+                  val t = phase * 6.2831855f
+                  val pulse = when (state) {
+                      St.IDLE -> 1f + 0.03f * sin(t)
+                      St.LISTENING -> 1f + 0.05f * sin(t * 2f) + level * 0.35f
+                      St.THINKING -> 1f + 0.02f * sin(t * 4f)
+                      St.SPEAKING -> 1f + 0.09f * sin(t * 3f)
+                  }
+                  val gr = base * 2.2f * pulse
+                  p.style = Paint.Style.FILL
+                  p.shader = RadialGradient(cx, cy, gr, intArrayOf(withAlpha(col, 150), withAlpha(col, 0)), null, Shader.TileMode.CLAMP)
+                  c.drawCircle(cx, cy, gr, p)
+                  p.shader = null
+                  p.color = withAlpha(col, 90)
+                  c.drawCircle(cx, cy, base * 0.8f * pulse, p)
+                  p.style = Paint.Style.STROKE
+                  p.strokeWidth = 4f
+                  for (i in 0..2) {
+                      val r = base * (1f + 0.28f * i) * pulse
+                      p.color = withAlpha(col, 230 - i * 60)
+                      if (state == St.THINKING) {
+                          val rect = RectF(cx - r, cy - r, cx + r, cy + r)
+                          val dir = if (i % 2 == 0) 1f else -1f
+                          c.drawArc(rect, phase * 360f * dir + i * 40f, 110f, false, p)
+                      } else {
+                          c.drawCircle(cx, cy, r, p)
+                      }
+                  }
+              }
+          }
+
+          class MainActivity : Activity() {
+              private val ui = Handler(Looper.getMainLooper())
+              private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default +
+                  CoroutineExceptionHandler { _, e -> logd("Erro interno: " + e.javaClass.simpleName + ": " + e.message) })
+              private lateinit var prefs: SharedPreferences
+              private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+              private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+              // views
+              private lateinit var root: FrameLayout
+              private lateinit var orb: OrbView
+              private lateinit var titleTv: TextView
+              private lateinit var statusTv: TextView
+              private lateinit var convoScroll: ScrollView
+              private lateinit var convoText: TextView
+              private lateinit var diagTv: TextView
+              private lateinit var voiceTv: TextView
+              private lateinit var inputEt: EditText
+              private lateinit var micBtn: Button
+              private lateinit var progressBox: LinearLayout
+              private lateinit var progressBar: ProgressBar
+              private lateinit var progressTv: TextView
+              private lateinit var retryBtn: Button
+              private lateinit var settingsPanel: ScrollView
+              private lateinit var logPanel: LinearLayout
+              private lateinit var logTv: TextView
+              private lateinit var logScroll: ScrollView
+              private lateinit var nameEt: EditText
+              private lateinit var rateSb: SeekBar
+              private lateinit var modelRg: RadioGroup
+              private lateinit var contSw: Switch
+              private lateinit var wakeSw: Switch
+              private lateinit var personaEt: EditText
+
+              // estado
+              @Volatile private var state = St.IDLE
+              private val logBuf = StringBuilder()
+              private val convoBase = StringBuilder()
+              private var step = "iniciando"
+              private var lastTps = 0.0
+              private var curBackend = "-"
+              private var engine: Engine? = null
+              private var conversation: Conversation? = null
+              private var engineModel = ""
+              @Volatile private var ready = false
+              @Volatile private var loading = false
+              private var turns = 0
+              private var busy = false
+              private var downloading = false
+              private var dlModel: ModelInfo? = null
+              private var greeted = false
+              private var notice = ""
+              private var resetPending = false
+              private var lastVoice = false
+              private var pendingAction: (() -> Unit)? = null
+              private var pendingDialog: AlertDialog? = null
+              private var torchOn = false
+
+              // voz
+              private var tts: TextToSpeech? = null
+              private var ttsReady = false
+              private var ttsInit = false
+              private var ttsPending = 0
+              private var ttsEpoch = 0
+              private var utt = 0
+              private var speakOn = true
+              private var genDone = true
+              private var recognizer: SpeechRecognizer? = null
+              private var offlineOk: Boolean? = null
+              private var noSpeechCount = 0
+
+              // ---------- util ----------
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+              private fun gs(k: String, d: String): String = prefs.getString(k, d) ?: d
+              private fun gb(k: String, d: Boolean): Boolean = prefs.getBoolean(k, d)
+              private fun gf(k: String, d: Float): Float = prefs.getFloat(k, d)
+              private fun assistantName(): String = gs("name", "Jarvis")
+              private fun curModel(): ModelInfo = MODELS.firstOrNull { it.id == gs("model", "gemma") } ?: MODELS[0]
+              private fun modelFile(m: ModelInfo): File = File(File(filesDir, "models"), m.file)
+              private fun hasModel(m: ModelInfo): Boolean {
+                  val f = modelFile(m)
+                  return f.exists() && f.length() > 100_000_000L
+              }
+              private fun fmtBytes(b: Long): String =
+                  if (b >= 1_000_000_000L) String.format(Locale.US, "%.2f GB", b / 1e9) else (b / 1_000_000L).toString() + " MB"
+              private fun toast(m: String) {
+                  runOnUiThread { Toast.makeText(this, m, Toast.LENGTH_LONG).show() }
+              }
+              private fun logd(m: String) {
+                  android.util.Log.d("JARVIS", m)
+                  val line = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date()) + "  " + m + "\n"
+                  runOnUiThread {
+                      logBuf.append(line)
+                      if (logBuf.length > 60000) logBuf.delete(0, logBuf.length - 50000)
+                      if (::logPanel.isInitialized && logPanel.visibility == View.VISIBLE) {
+                          logTv.text = logBuf.toString()
+                      }
+                  }
+              }
+              private fun setStep(s: String) {
+                  step = s
+                  logd("Etapa: " + s)
+                  refreshDiag()
+              }
+              private fun setStatus(s: String) {
+                  runOnUiThread { if (::statusTv.isInitialized) statusTv.text = s }
+              }
+              private fun thermal(): Int =
+                  if (Build.VERSION.SDK_INT >= 29) (getSystemService(Context.POWER_SERVICE) as PowerManager).currentThermalStatus else 0
+              private fun availMb(): Long {
+                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                  val mi = ActivityManager.MemoryInfo()
+                  am.getMemoryInfo(mi)
+                  return mi.availMem / 1048576L
+              }
+              private fun memInfo(): String {
+                  val dm = Debug.MemoryInfo()
+                  Debug.getMemoryInfo(dm)
+                  return "RAM livre " + availMb() + " MB | app " + (dm.totalPss / 1024) + " MB | térmico " + thermal()
+              }
+              private fun refreshDiag() {
+                  runOnUiThread {
+                      if (!::diagTv.isInitialized) return@runOnUiThread
+                      diagTv.text = "Etapa: " + step + "\n~tok/s: " + String.format(Locale.US, "%.1f", lastTps) +
+                          " | " + memInfo() + "\nModelo: " + engineModel + " / " + curBackend
+                      voiceTv.text = when (offlineOk) {
+                          true -> "Voz: reconhecimento OFFLINE disponível"
+                          false -> "Voz: pacote offline pt-BR NÃO instalado. Usando ONLINE (áudio vai ao Google)"
+                          null -> "Voz: modo offline preferido (não consegui verificar)"
+                      }
+                  }
+              }
+              private val diagRunnable = object : Runnable {
+                  override fun run() {
+                      refreshDiag()
+                      ui.postDelayed(this, 3000)
+                  }
+              }
+              private fun norm(s: String): String {
+                  val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
+                  return d.replace(Regex("\\p{M}+"), "").replace(Regex("[^a-z0-9: ]"), " ").replace(Regex("\\s+"), " ").trim()
+              }
+
+              // ---------- ciclo de vida ----------
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("jarvis", MODE_PRIVATE)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  val old = Thread.getDefaultUncaughtExceptionHandler()
+                  Thread.setDefaultUncaughtExceptionHandler { t, e ->
+                      try {
+                          prefs.edit().putString("last_crash", android.util.Log.getStackTraceString(e).take(3500)).commit()
+                      } catch (x: Throwable) {
+                      }
+                      old?.uncaughtException(t, e)
+             
