@@ -56,9 +56,16 @@ jobs:
               id("org.jetbrains.kotlin.android")
           }
 
+          kotlin {
+              compilerOptions {
+                  optIn.add("com.google.ai.edge.litertlm.ExperimentalApi")
+                  freeCompilerArgs.add("-Xskip-metadata-version-check")
+              }
+          }
+
           android {
               namespace = "br.local.jarvis"
-              compileSdk = 35
+              compileSdk = 36
               defaultConfig {
                   applicationId = "br.local.jarvis"
                   minSdk = 31
@@ -72,6 +79,11 @@ jobs:
               compileOptions {
                   sourceCompatibility = JavaVersion.VERSION_17
                   targetCompatibility = JavaVersion.VERSION_17
+              }
+              packaging {
+                  jniLibs {
+                      pickFirsts += "**/libc++_shared.so"
+                  }
               }
           }
 
@@ -240,7 +252,7 @@ jobs:
 
               private fun withAlpha(c: Int, a: Int): Int = (c and 0x00FFFFFF) or (a shl 24)
 
-              override fun onDraw(c: Canvas) {
+              override fun onDraw(canvas: Canvas) {
                   val cx = width / 2f
                   val cy = height / 2f
                   val base = minOf(width, height) * 0.28f
@@ -260,10 +272,10 @@ jobs:
                   val gr = base * 2.2f * pulse
                   p.style = Paint.Style.FILL
                   p.shader = RadialGradient(cx, cy, gr, intArrayOf(withAlpha(col, 150), withAlpha(col, 0)), null, Shader.TileMode.CLAMP)
-                  c.drawCircle(cx, cy, gr, p)
+                  canvas.drawCircle(cx, cy, gr, p)
                   p.shader = null
                   p.color = withAlpha(col, 90)
-                  c.drawCircle(cx, cy, base * 0.8f * pulse, p)
+                  canvas.drawCircle(cx, cy, base * 0.8f * pulse, p)
                   p.style = Paint.Style.STROKE
                   p.strokeWidth = 4f
                   for (i in 0..2) {
@@ -272,9 +284,9 @@ jobs:
                       if (state == St.THINKING) {
                           val rect = RectF(cx - r, cy - r, cx + r, cy + r)
                           val dir = if (i % 2 == 0) 1f else -1f
-                          c.drawArc(rect, phase * 360f * dir + i * 40f, 110f, false, p)
+                          canvas.drawArc(rect, phase * 360f * dir + i * 40f, 110f, false, p)
                       } else {
-                          c.drawCircle(cx, cy, r, p)
+                          canvas.drawCircle(cx, cy, r, p)
                       }
                   }
               }
@@ -381,10 +393,17 @@ jobs:
                   refreshDiag()
               }
               private fun setStatus(s: String) {
-                  runOnUiThread { if (::statusTv.isInitialized) statusTv.text = s }
+                  runOnUiThread {
+                      if (::statusTv.isInitialized) statusTv.text = s
+                  }
               }
-              private fun thermal(): Int =
-                  if (Build.VERSION.SDK_INT >= 29) (getSystemService(Context.POWER_SERVICE) as PowerManager).currentThermalStatus else 0
+              private fun thermal(): Int {
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                      return pm.currentThermalStatus
+                  }
+                  return 0
+              }
               private fun availMb(): Long {
                   val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                   val mi = ActivityManager.MemoryInfo()
@@ -398,13 +417,13 @@ jobs:
               }
               private fun refreshDiag() {
                   runOnUiThread {
-                      if (!::diagTv.isInitialized) return@runOnUiThread
-                      diagTv.text = "Etapa: " + step + "\n~tok/s: " + String.format(Locale.US, "%.1f", lastTps) +
-                          " | " + memInfo() + "\nModelo: " + engineModel + " / " + curBackend
-                      voiceTv.text = when (offlineOk) {
-                          true -> "Voz: reconhecimento OFFLINE disponível"
-                          false -> "Voz: pacote offline pt-BR NÃO instalado. Usando ONLINE (áudio vai ao Google)"
-                          null -> "Voz: modo offline preferido (não consegui verificar)"
+                      if (::diagTv.isInitialized) {
+                          diagTv.text = "Etapa: " + step + "\n~tok/s: " + String.format(Locale.US, "%.1f", lastTps) +
+                              " | " + memInfo() + "\nModelo: " + engineModel + " / " + curBackend
+                          val ok = offlineOk
+                          voiceTv.text = if (ok == true) "Voz: reconhecimento OFFLINE disponível"
+                          else if (ok == false) "Voz: pacote offline pt-BR NÃO instalado. Usando ONLINE (áudio vai ao Google)"
+                          else "Voz: modo offline preferido (não consegui verificar)"
                       }
                   }
               }
@@ -493,7 +512,7 @@ jobs:
                   }
                   if (Build.VERSION.SDK_INT >= 30) {
                       try {
-                          val am = getSystemService(ActivityManager::class.java)
+                          val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
                           for (i in am.getHistoricalProcessExitReasons(packageName, 0, 3)) {
                               logd("Saída anterior: " + exitName(i.reason) + " | " + i.description + " | há " +
                                   ((System.currentTimeMillis() - i.timestamp) / 60000L) + " min")
@@ -566,6 +585,12 @@ jobs:
                   return p
               }
 
+              private fun lpLeft(left: Int): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(WRAP, WRAP)
+                  p.leftMargin = dp(left)
+                  return p
+              }
+
               private fun edit(text: String, multi: Boolean): EditText {
                   val e = EditText(this)
                   e.setText(text)
@@ -595,10 +620,11 @@ jobs:
                   titleTv = tv(assistantName(), 24f, 0xFF7FDBFF.toInt())
                   top.addView(titleTv, LinearLayout.LayoutParams(0, WRAP, 1f))
                   top.addView(btn("Conversa", 12f) {
-                      convoScroll.visibility = if (convoScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+                      if (convoScroll.visibility == View.VISIBLE) convoScroll.visibility = View.GONE
+                      else convoScroll.visibility = View.VISIBLE
                   })
-                  top.addView(btn("Log", 12f) { showLog(true) }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
-                  top.addView(btn("Ajustes", 12f) { showSettings(true) }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  top.addView(btn("Log", 12f) { showLog(true) }, lpLeft(6))
+                  top.addView(btn("Ajustes", 12f) { showSettings(true) }, lpLeft(6))
                   main.addView(top, lp(MATCH, WRAP))
 
                   statusTv = tv("Iniciando…", 14f, 0xFFB0C4D8.toInt())
@@ -649,7 +675,7 @@ jobs:
                       true
                   }
                   row.addView(inputEt, LinearLayout.LayoutParams(0, WRAP, 1f))
-                  row.addView(btn("Enviar", 14f) { sendTyped() }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  row.addView(btn("Enviar", 14f) { sendTyped() }, lpLeft(6))
                   main.addView(row, lp(MATCH, WRAP, 8))
 
                   micBtn = btn("Toque para falar", 18f, 0xFF0D5C3A.toInt()) { startListening() }
@@ -718,8 +744,11 @@ jobs:
                   col.addView(btn("Salvar e fechar", 16f, 0xFF0D5C3A.toInt()) { saveSettings() }, lp(MATCH, WRAP, 16))
                   col.addView(btn("Baixar / conferir modelo") {
                       val m = MODELS[max(0, modelRg.checkedRadioButtonId - 1000)]
-                      if (hasModel(m)) toast(m.label + " já está baixado (" + fmtBytes(modelFile(m).length()) + ")")
-                      else offerDownload(m)
+                      if (hasModel(m)) {
+                          toast(m.label + " já está baixado (" + fmtBytes(modelFile(m).length()) + ")")
+                      } else {
+                          offerDownload(m)
+                      }
                   }, lp(MATCH, WRAP, 10))
                   col.addView(btn("Refazer teste GPU/CPU") {
                       prefs.edit().remove("backend").remove("bad_gpu").apply()
@@ -753,8 +782,8 @@ jobs:
                       }
                       modelRg.check(1000 + MODELS.indexOf(curModel()))
                   } else {
-                      (getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
-                          .hideSoftInputFromWindow(root.windowToken, 0)
+                      val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+                      imm.hideSoftInputFromWindow(root.windowToken, 0)
                   }
                   settingsPanel.visibility = if (show) View.VISIBLE else View.GONE
               }
@@ -795,8 +824,8 @@ jobs:
                   bar.addView(btn("Limpar", 13f) {
                       logBuf.setLength(0)
                       logTv.text = ""
-                  }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
-                  bar.addView(btn("Fechar", 13f) { showLog(false) }, lp(WRAP, WRAP).also { it.leftMargin = dp(6) })
+                  }, lpLeft(6))
+                  bar.addView(btn("Fechar", 13f) { showLog(false) }, lpLeft(6))
                   box.addView(bar)
                   logTv = tv("", 11f, 0xFFB8F5C8.toInt())
                   logTv.setTextIsSelectable(true)
@@ -817,17 +846,18 @@ jobs:
               private fun setState(s: St) {
                   runOnUiThread {
                       state = s
-                      if (!::orb.isInitialized) return@runOnUiThread
-                      orb.state = s
-                      if (ready || s != St.IDLE) {
-                          statusTv.text = when (s) {
-                              St.IDLE -> "Pronto. Toque no microfone."
-                              St.LISTENING -> "Ouvindo…"
-                              St.THINKING -> "Pensando…"
-                              St.SPEAKING -> "Falando… (toque na tela para parar)"
+                      if (::orb.isInitialized) {
+                          orb.state = s
+                          if (ready || s != St.IDLE) {
+                              statusTv.text = when (s) {
+                                  St.IDLE -> "Pronto. Toque no microfone."
+                                  St.LISTENING -> "Ouvindo…"
+                                  St.THINKING -> "Pensando…"
+                                  St.SPEAKING -> "Falando… (toque na tela para parar)"
+                              }
                           }
+                          micBtn.text = if (s == St.LISTENING) "Ouvindo… (toque para parar)" else "Toque para falar"
                       }
-                      micBtn.text = if (s == St.LISTENING) "Ouvindo… (toque para parar)" else "Toque para falar"
                   }
               }
 
@@ -861,7 +891,7 @@ jobs:
               }
 
               private fun initTts() {
-                  tts = TextToSpeech(this) { st ->
+                  tts = TextToSpeech(this, TextToSpeech.OnInitListener { st ->
                       if (st == TextToSpeech.SUCCESS) {
                           val t = tts
                           if (t != null) {
@@ -870,14 +900,20 @@ jobs:
                               t.setSpeechRate(gf("rate", 1.0f))
                               t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                                   override fun onStart(utteranceId: String?) {
-                                      ui.post { if (epochOk(utteranceId)) setState(St.SPEAKING) }
+                                      ui.post {
+                                          if (epochOk(utteranceId)) setState(St.SPEAKING)
+                                      }
                                   }
                                   override fun onDone(utteranceId: String?) {
-                                      ui.post { if (epochOk(utteranceId)) ttsDone() }
+                                      ui.post {
+                                          if (epochOk(utteranceId)) ttsDone()
+                                      }
                                   }
-                                  @Suppress("OVERRIDE_DEPRECATION")
+                                  @Deprecated("Deprecated in Java")
                                   override fun onError(utteranceId: String?) {
-                                      ui.post { if (epochOk(utteranceId)) ttsDone() }
+                                      ui.post {
+                                          if (epochOk(utteranceId)) ttsDone()
+                                      }
                                   }
                               })
                               logd("TTS iniciado. pt-BR disponível: " + ttsReady)
@@ -890,7 +926,7 @@ jobs:
                       }
                       ttsInit = true
                       maybeGreet()
-                  }
+                  })
               }
 
               private fun epochOk(id: String?): Boolean = id != null && id.startsWith("e" + ttsEpoch + "-")
@@ -952,7 +988,7 @@ jobs:
                   return t.trimStart()
               }
 
-              private fun extractSentences(buf: StringBuilder, final: Boolean): List<String> {
+              private fun extractSentences(buf: StringBuilder, fin: Boolean): List<String> {
                   val out = ArrayList<String>()
                   while (true) {
                       var cut = -1
@@ -967,7 +1003,7 @@ jobs:
                                   cut = i
                                   break
                               }
-                              if (final && i + 1 == buf.length) {
+                              if (fin && i + 1 == buf.length) {
                                   cut = i
                                   break
                               }
@@ -977,7 +1013,7 @@ jobs:
                       out.add(buf.substring(0, cut + 1))
                       buf.delete(0, cut + 1)
                   }
-                  if (final && buf.isNotBlank()) {
+                  if (fin && buf.isNotBlank()) {
                       out.add(buf.toString())
                       buf.setLength(0)
                   }
@@ -1049,15 +1085,19 @@ jobs:
                   try {
                       val r = SpeechRecognizer.createSpeechRecognizer(this)
                       val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                          .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                       r.checkRecognitionSupport(i, mainExecutor, object : RecognitionSupportCallback {
                           override fun onSupportResult(recognitionSupport: RecognitionSupport) {
                               val inst = recognitionSupport.installedOnDeviceLanguages
-                              offlineOk = inst.any { it.lowercase().startsWith("pt") }
-                              logd("Voz offline instalada: " + inst + " -> pt: " + offlineOk)
+                              var has = false
+                              for (l in inst) {
+                                  if (l.lowercase().startsWith("pt")) has = true
+                              }
+                              offlineOk = has
+                              logd("Voz offline instalada: " + inst + " -> pt: " + has)
                               r.destroy()
                               refreshDiag()
-                              if (offlineOk == false && !gb("help_shown", false)) {
+                              if (!has && !gb("help_shown", false)) {
                                   prefs.edit().putBoolean("help_shown", true).apply()
                                   runOnUiThread { showVoiceHelp() }
                               }
@@ -1078,23 +1118,23 @@ jobs:
                       "2. Na aba 'Todos', toque em 'Português (Brasil)' e baixe.\n\n" +
                       "Os nomes dos menus mudam um pouco conforme o aparelho. Enquanto o pacote não estiver instalado, o app pode usar o reconhecimento ONLINE do Google (seu áudio é enviado ao Google). Um aviso aparece na tela quando isso acontecer."
                   val b = AlertDialog.Builder(this)
-                      .setTitle("Voz offline em português")
-                      .setMessage(msg)
-                      .setPositiveButton("Abrir ajustes de voz") { _, _ ->
-                          try {
-                              startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-                          } catch (t: Throwable) {
-                              startActivity(Intent(Settings.ACTION_SETTINGS))
-                          }
+                  b.setTitle("Voz offline em português")
+                  b.setMessage(msg)
+                  b.setPositiveButton("Abrir ajustes de voz") { _, _ ->
+                      try {
+                          startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+                      } catch (t: Throwable) {
+                          startActivity(Intent(Settings.ACTION_SETTINGS))
                       }
-                      .setNegativeButton("Fechar", null)
+                  }
+                  b.setNegativeButton("Fechar") { _, _ -> }
                   if (Build.VERSION.SDK_INT >= 33) {
                       b.setNeutralButton("Tentar baixar aqui") { _, _ ->
                           try {
                               val r = SpeechRecognizer.createSpeechRecognizer(this)
                               val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                                  .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                                  .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                              i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                              i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
                               r.triggerModelDownload(i)
                               toast("Pedi o download do pacote. Pode levar alguns minutos.")
                           } catch (t: Throwable) {
@@ -1143,14 +1183,14 @@ jobs:
                       override fun onPartialResults(partialResults: Bundle?) {
                           val l = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                           val p = l?.firstOrNull()
-                          if (!p.isNullOrBlank()) setStatus("Ouvindo: " + p)
+                          if (p != null && p.isNotBlank()) setStatus("Ouvindo: " + p)
                       }
                       override fun onResults(results: Bundle?) {
                           orb.level = 0f
                           val l = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                           val t = l?.firstOrNull()
                           setState(St.IDLE)
-                          if (t.isNullOrBlank()) {
+                          if (t == null || t.isBlank()) {
                               onListenFail(7)
                           } else {
                               noSpeechCount = 0
@@ -1162,15 +1202,15 @@ jobs:
                           onListenFail(error)
                       }
                   })
-                  val it = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                  it.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
-                  it.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
-                  it.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-                  it.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                  it.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  val ri = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                  ri.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+                  ri.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                  ri.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
                   setState(St.LISTENING)
-                  r.startListening(it)
+                  r.startListening(ri)
               }
 
               private fun onListenFail(e: Int) {
@@ -1195,7 +1235,9 @@ jobs:
                   if (e == 6 || e == 7) {
                       noSpeechCount++
                       if (gb("cont", false) && noSpeechCount < 3) {
-                          ui.postDelayed({ if (state == St.IDLE && !busy) startListening() }, 400)
+                          ui.postDelayed({
+                              if (state == St.IDLE && !busy) startListening()
+                          }, 400)
                       } else if (noSpeechCount >= 3) {
                           noSpeechCount = 0
                           setStatus("Conversa contínua em pausa. Toque no microfone para continuar.")
@@ -1254,19 +1296,19 @@ jobs:
                   pendingAction = action
                   runOnUiThread {
                       pendingDialog?.dismiss()
-                      pendingDialog = AlertDialog.Builder(this)
-                          .setMessage(desc + "\n\n(Você também pode dizer 'sim' ou 'não'.)")
-                          .setPositiveButton("Confirmar") { _, _ ->
-                              val a = pendingAction
-                              pendingAction = null
-                              a?.invoke()
-                          }
-                          .setNegativeButton("Cancelar") { _, _ ->
-                              pendingAction = null
-                              reply("Cancelado.")
-                          }
-                          .setOnCancelListener { pendingAction = null }
-                          .show()
+                      val b = AlertDialog.Builder(this)
+                      b.setMessage(desc + "\n\n(Você também pode dizer 'sim' ou 'não'.)")
+                      b.setPositiveButton("Confirmar") { _, _ ->
+                          val a = pendingAction
+                          pendingAction = null
+                          if (a != null) a()
+                      }
+                      b.setNegativeButton("Cancelar") { _, _ ->
+                          pendingAction = null
+                          reply("Cancelado.")
+                      }
+                      b.setOnCancelListener { pendingAction = null }
+                      pendingDialog = b.show()
                   }
                   reply(desc + " Confirma?")
               }
@@ -1285,7 +1327,8 @@ jobs:
                   val cm = getSystemService(Context.CAMERA_SERVICE) as CameraManager
                   for (id in cm.cameraIdList) {
                       val ch = cm.getCameraCharacteristics(id)
-                      if (ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true) {
+                      val flash = ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE)
+                      if (flash == true) {
                           cm.setTorchMode(id, on)
                           torchOn = on
                           return true
@@ -1296,20 +1339,21 @@ jobs:
 
               private fun findApp(q: String): Pair<String, String>? {
                   val pm = packageManager
-                  val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  val mainIntent = Intent(Intent.ACTION_MAIN)
+                  mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
                   var best: Pair<String, String>? = null
                   var bestScore = 0
-                  for (ri in pm.queryIntentActivities(i, 0)) {
-                      val label = ri.loadLabel(pm).toString()
-                      val ln = norm(label)
-                      val score = if (ln == q) 100
-                      else if (ln.startsWith(q)) 80
-                      else if (ln.contains(q)) 60
-                      else if (ln.length >= 3 && q.contains(ln)) 50
-                      else 0
+                  for (ri in pm.queryIntentActivities(mainIntent, 0)) {
+                      val lab = ri.loadLabel(pm).toString()
+                      val ln = norm(lab)
+                      var score = 0
+                      if (ln == q) score = 100
+                      else if (ln.startsWith(q)) score = 80
+                      else if (ln.contains(q)) score = 60
+                      else if (ln.length >= 3 && q.contains(ln)) score = 50
                       if (score > bestScore) {
                           bestScore = score
-                          best = Pair(label, ri.activityInfo.packageName)
+                          best = Pair(lab, ri.activityInfo.packageName)
                       }
                   }
                   return best
@@ -1326,9 +1370,9 @@ jobs:
                   }
 
                   if (Regex("\\b(que horas|as horas|horas sao|hora atual|horario)\\b").containsMatchIn(n)) {
-                      val c = Calendar.getInstance()
-                      val h = c.get(Calendar.HOUR_OF_DAY)
-                      val m = c.get(Calendar.MINUTE)
+                      val cal = Calendar.getInstance()
+                      val h = cal.get(Calendar.HOUR_OF_DAY)
+                      val m = cal.get(Calendar.MINUTE)
                       val hs = when (h) {
                           0 -> "É meia-noite"
                           1 -> "É uma hora"
@@ -1347,9 +1391,10 @@ jobs:
                   }
 
                   if (n.contains("lanterna")) {
-                      val on = if (n.contains("apag") || n.contains("deslig")) false
-                      else if (n.contains("acend") || n.contains("lig")) true
-                      else !torchOn
+                      val on: Boolean
+                      if (n.contains("apag") || n.contains("deslig")) on = false
+                      else if (n.contains("acend") || n.contains("lig")) on = true
+                      else on = !torchOn
                       try {
                           if (setTorch(on)) reply(if (on) "Lanterna ligada." else "Lanterna apagada.")
                           else reply("Não encontrei o flash neste aparelho.")
@@ -1371,9 +1416,9 @@ jobs:
                       val secs = if (u.startsWith("seg")) v else if (u.startsWith("min")) v * 60 else v * 3600
                       confirm("Criar um timer de " + v + " " + u + "?") {
                           val i = Intent(AlarmClock.ACTION_SET_TIMER)
-                              .putExtra(AlarmClock.EXTRA_LENGTH, secs)
-                              .putExtra(AlarmClock.EXTRA_MESSAGE, assistantName())
-                              .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                          i.putExtra(AlarmClock.EXTRA_LENGTH, secs)
+                          i.putExtra(AlarmClock.EXTRA_MESSAGE, assistantName())
+                          i.putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                           tryStart(i, "Timer criado.", "Não consegui criar o timer.")
                       }
                       return true
@@ -1403,10 +1448,10 @@ jobs:
                       val mm = mi
                       confirm("Criar um alarme para " + String.format(Locale.US, "%02d:%02d", hh, mm) + "?") {
                           val i = Intent(AlarmClock.ACTION_SET_ALARM)
-                              .putExtra(AlarmClock.EXTRA_HOUR, hh)
-                              .putExtra(AlarmClock.EXTRA_MINUTES, mm)
-                              .putExtra(AlarmClock.EXTRA_MESSAGE, assistantName())
-                              .putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                          i.putExtra(AlarmClock.EXTRA_HOUR, hh)
+                          i.putExtra(AlarmClock.EXTRA_MINUTES, mm)
+                          i.putExtra(AlarmClock.EXTRA_MESSAGE, assistantName())
+                          i.putExtra(AlarmClock.EXTRA_SKIP_UI, true)
                           tryStart(i, "Alarme criado.", "Não consegui criar o alarme.")
                       }
                       return true
@@ -1422,7 +1467,9 @@ jobs:
                           confirm("Abrir o aplicativo " + app.first + "?") {
                               val li = packageManager.getLaunchIntentForPackage(app.second)
                               reply("Abrindo " + app.first + ".")
-                              if (li != null) ui.postDelayed({ startActivity(li) }, 1500)
+                              if (li != null) {
+                                  ui.postDelayed({ startActivity(li) }, 1500)
+                              }
                           }
                       }
                       return true
@@ -1467,13 +1514,16 @@ jobs:
                   return persona + (if (n.isEmpty()) "" else "\nFatos que o usuário pediu para você lembrar: " + n.joinToString("; ") + ".")
               }
 
-              private fun makeConfig(m: ModelInfo, f: File, be: String): EngineConfig =
-                  EngineConfig(
+              private fun makeConfig(m: ModelInfo, f: File, be: String): EngineConfig {
+                  val backendObj = if (be == "gpu") Backend.GPU() else Backend.CPU()
+                  val maxTok: Int? = if (m.id == "gemma") 4096 else null
+                  return EngineConfig(
                       modelPath = f.absolutePath,
-                      backend = if (be == "gpu") Backend.GPU() else Backend.CPU(),
-                      maxNumTokens = if (m.id == "gemma") 4096 else null,
+                      backend = backendObj,
+                      maxNumTokens = maxTok,
                       cacheDir = cacheDir.absolutePath
                   )
+              }
 
               private fun releaseEngine() {
                   ready = false
@@ -1492,7 +1542,9 @@ jobs:
 
               private fun loadModelOrOffer() {
                   val m = curModel()
-                  if (hasModel(m)) loadModel() else {
+                  if (hasModel(m)) {
+                      loadModel()
+                  } else {
                       setStatus("Modelo " + m.label + " ainda não baixado.")
                       offerDownload(m)
                   }
@@ -1559,11 +1611,11 @@ jobs:
                           continue
                       }
                       prefs.edit().putString("pending_be", be).commit()
-                      val tps = try {
-                          testBackend(m, f, be)
+                      var tps = -1.0
+                      try {
+                          tps = testBackend(m, f, be)
                       } catch (t: Throwable) {
                           logd("Teste " + be + " falhou: " + t.javaClass.simpleName + ": " + t.message)
-                          -1.0
                       }
                       prefs.edit().putString("pending_be", "").commit()
                       logd("Teste " + be + ": " + (if (tps > 0) String.format(Locale.US, "%.1f ~tok/s", tps) else "falhou"))
@@ -1632,31 +1684,32 @@ jobs:
                   conversation = null
                   resetPending = false
                   val e = engine ?: throw IllegalStateException("motor não iniciado")
-                  val init = ArrayList<Message>()
+                  val initMsgs = ArrayList<Message>()
                   for (h in loadHistory().takeLast(6)) {
-                      init.add(if (h.first) Message.user(h.second) else Message.model(h.second))
+                      if (h.first) initMsgs.add(Message.user(h.second)) else initMsgs.add(Message.model(h.second))
                   }
                   turns = 0
                   val sampler = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.7)
                   val sys = Contents.of(buildSystemPrompt())
-                  val conv = try {
-                      e.createConversation(ConversationConfig(
+                  var conv: Conversation
+                  try {
+                      conv = e.createConversation(ConversationConfig(
                           systemInstruction = sys,
-                          initialMessages = init,
+                          initialMessages = initMsgs,
                           samplerConfig = sampler,
                           thinkingConfig = ThinkingConfig(enableThinking = false, thinkingTokenBudget = 0),
                           maxOutputToken = 400
                       ))
                   } catch (t: Throwable) {
                       logd("Conversa com 'thinking' falhou (" + t.message + "); tentando sem.")
-                      e.createConversation(ConversationConfig(
+                      conv = e.createConversation(ConversationConfig(
                           systemInstruction = sys,
-                          initialMessages = init,
+                          initialMessages = initMsgs,
                           samplerConfig = sampler
                       ))
                   }
                   conversation = conv
-                  logd("Nova conversa criada (histórico: " + init.size + " msgs)")
+                  logd("Nova conversa criada (histórico: " + initMsgs.size + " msgs)")
                   return conv
               }
 
@@ -1717,14 +1770,14 @@ jobs:
                           genDone = true
                           if (finalText.isBlank()) {
                               reply(if (fl != null) "Tive um problema ao pensar. Veja o log de diagnóstico." else "Desculpe, não consegui formular uma resposta.")
-                              return@runOnUiThread
+                          } else {
+                              commitReply(finalText)
+                              for (s in rest) speakSentence(s)
+                              logd("Resposta: " + chars + " caracteres em " + String.format(Locale.US, "%.1f", secs) +
+                                  " s (~" + String.format(Locale.US, "%.1f", lastTps) + " tok/s) | " + memInfo())
+                              healthCheck()
+                              if (ttsPending == 0) finishTurn()
                           }
-                          commitReply(finalText)
-                          for (s in rest) speakSentence(s)
-                          logd("Resposta: " + chars + " caracteres em " + String.format(Locale.US, "%.1f", secs) +
-                              " s (~" + String.format(Locale.US, "%.1f", lastTps) + " tok/s) | " + memInfo())
-                          healthCheck()
-                          if (ttsPending == 0) finishTurn()
                       }
                   }
               }
@@ -1752,7 +1805,8 @@ jobs:
 
               private fun isWifi(): Boolean {
                   val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                  val nc = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+                  val net = cm.activeNetwork ?: return false
+                  val nc = cm.getNetworkCapabilities(net) ?: return false
                   return nc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || nc.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
               }
 
@@ -1763,15 +1817,15 @@ jobs:
                           ") uma única vez. Depois o app funciona sem internet.\n\n" +
                           (if (wifi) "Você está no Wi-Fi. Ótimo." else "ATENÇÃO: você NÃO está no Wi-Fi. Recomendo conectar ao Wi-Fi para não gastar seus dados móveis.") +
                           "\n\nMantenha o app aberto durante o download. Se cair, toque em 'Retomar' e ele continua de onde parou."
-                      AlertDialog.Builder(this)
-                          .setTitle("Baixar modelo de IA")
-                          .setMessage(msg)
-                          .setCancelable(false)
-                          .setPositiveButton(if (wifi) "Baixar agora" else "Baixar mesmo assim") { _, _ -> startDownload(mi) }
-                          .setNegativeButton("Agora não") { _, _ ->
-                              setStatus("Modelo não baixado. Ajustes > Baixar / conferir modelo.")
-                          }
-                          .show()
+                      val b = AlertDialog.Builder(this)
+                      b.setTitle("Baixar modelo de IA")
+                      b.setMessage(msg)
+                      b.setCancelable(false)
+                      b.setPositiveButton(if (wifi) "Baixar agora" else "Baixar mesmo assim") { _, _ -> startDownload(mi) }
+                      b.setNegativeButton("Agora não") { _, _ ->
+                          setStatus("Modelo não baixado. Ajustes > Baixar / conferir modelo.")
+                      }
+                      b.show()
                   }
               }
 
@@ -1795,7 +1849,7 @@ jobs:
                           try {
                               ok = downloadOnce(mi)
                           } catch (t: FatalDl) {
-                              fatal = t.message
+                              fatal = t.message ?: "erro"
                           } catch (t: Throwable) {
                               logd("Download: " + t.javaClass.simpleName + ": " + t.message + " (tentativa " + attempt + ")")
                               runOnUiThread { progressTv.text = "Conexão instável, tentando de novo (" + attempt + ")…" }
@@ -1835,26 +1889,25 @@ jobs:
                   var url = mi.url
                   var conn: HttpURLConnection? = null
                   var hops = 0
-                  while (true) {
-                      val c = URL(url).openConnection() as HttpURLConnection
-                      c.instanceFollowRedirects = false
-                      c.connectTimeout = 20000
-                      c.readTimeout = 30000
-                      c.setRequestProperty("User-Agent", "JarvisLocal/1.0")
-                      if (have > 0) c.setRequestProperty("Range", "bytes=" + have + "-")
-                      val code = c.responseCode
-                      if (code in 300..399) {
-                          val loc = c.getHeaderField("Location") ?: throw RuntimeException("redirecionamento sem destino")
+                  while (conn == null) {
+                      val cc = URL(url).openConnection() as HttpURLConnection
+                      cc.instanceFollowRedirects = false
+                      cc.connectTimeout = 20000
+                      cc.readTimeout = 30000
+                      cc.setRequestProperty("User-Agent", "JarvisLocal/1.0")
+                      if (have > 0) cc.setRequestProperty("Range", "bytes=" + have + "-")
+                      val rc = cc.responseCode
+                      if (rc in 300..399) {
+                          val loc = cc.getHeaderField("Location") ?: throw RuntimeException("redirecionamento sem destino")
                           url = URL(URL(url), loc).toString()
-                          c.disconnect()
+                          cc.disconnect()
                           hops++
                           if (hops > 6) throw RuntimeException("redirecionamentos demais")
-                          continue
+                      } else {
+                          conn = cc
                       }
-                      conn = c
-                      break
                   }
-                  val c = conn ?: throw RuntimeException("sem conexão")
+                  val c: HttpURLConnection = conn
                   val code = c.responseCode
                   if (code == 401 || code == 403) {
                       throw FatalDl("HTTP " + code + ": acesso negado. O modelo pode exigir login/licença no Hugging Face.")
@@ -1879,10 +1932,12 @@ jobs:
                       throw FatalDl("Sem espaço: precisa de " + fmtBytes(need) + " livres no celular.")
                   }
                   logd("Download " + mi.label + ": retomando em " + fmtBytes(have) + " de " + fmtBytes(total))
-                  RandomAccessFile(part, "rw").use { raf ->
+                  val raf = RandomAccessFile(part, "rw")
+                  try {
                       raf.seek(have)
                       val buf = ByteArray(256 * 1024)
-                      c.inputStream.use { ins ->
+                      val ins = c.inputStream
+                      try {
                           var lastUi = 0L
                           var lastBytes = have
                           var lastT = System.currentTimeMillis()
@@ -1890,7 +1945,7 @@ jobs:
                               val n = ins.read(buf)
                               if (n < 0) break
                               raf.write(buf, 0, n)
-                              have += n
+                              have += n.toLong()
                               val now = System.currentTimeMillis()
                               if (now - lastUi > 500) {
                                   val speed = (have - lastBytes) * 1000.0 / max(now - lastT, 1L)
@@ -1900,7 +1955,11 @@ jobs:
                                   lastT = now
                               }
                           }
+                      } finally {
+                          ins.close()
                       }
+                  } finally {
+                      raf.close()
                   }
                   c.disconnect()
                   if (have < total) throw RuntimeException("conexão caiu em " + fmtBytes(have))
@@ -1924,7 +1983,7 @@ jobs:
       - name: Instalar Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: 'platform-tools platforms;android-35 build-tools;35.0.0'
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
 
       - name: Instalar Gradle 8.13
         uses: gradle/actions/setup-gradle@v4
@@ -1932,15 +1991,23 @@ jobs:
           gradle-version: '8.13'
           cache-disabled: true
 
-      - name: Versão da biblioteca de IA que será usada
-        working-directory: jarvis
-        run: |
-          gradle --version
-          gradle -q :app:dependencies --configuration debugRuntimeClasspath | grep -i litertlm || true
-
       - name: Compilar o APK
         working-directory: jarvis
-        run: gradle --no-daemon --stacktrace assembleDebug
+        run: |
+          set +e
+          gradle --no-daemon --console=plain assembleDebug > build.log 2>&1
+          code=$?
+          echo "gradle terminou com codigo $code"
+          if [ $code -ne 0 ]; then
+            echo "=============== RESUMO DOS ERROS ==============="
+            grep -E "^e: |What went wrong|Execution failed|Could not|requires|incompatible|Caused by|error:" -A4 build.log | head -n 70
+            echo "------ ultimas linhas ------"
+            tail -n 25 build.log
+            echo "================================================"
+          else
+            grep -i litertlm build.log | head -n 3 || true
+          fi
+          exit $code
 
       - name: Preparar o APK
         run: |
