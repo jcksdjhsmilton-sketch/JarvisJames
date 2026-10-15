@@ -1,0 +1,1233 @@
+name: Build Jarvis Controle APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/controle.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Criar o projeto Android inteiro
+        run: |
+          set -e
+          mkdir -p controle/app/src/main/kotlin/br/local/jarvis/controle
+
+          cat > controle/settings.gradle.kts <<'JVEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "JarvisControle"
+          include(":app")
+          JVEOF
+
+          cat > controle/build.gradle.kts <<'JVEOF'
+          plugins {
+              id("com.android.application") version "8.11.1" apply false
+              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+          }
+          JVEOF
+
+          cat > controle/gradle.properties <<'JVEOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          JVEOF
+
+          cat > controle/app/build.gradle.kts <<'JVEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "br.local.jarvis.controle"
+              compileSdk = 36
+              defaultConfig {
+                  applicationId = "br.local.jarvis.controle"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+          JVEOF
+
+          cat > controle/app/src/main/AndroidManifest.xml <<'JVEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <application
+                  android:label="Jarvis Controle"
+                  android:allowBackup="false"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|uiMode"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          JVEOF
+
+          cat > controle/app/src/main/kotlin/br/local/jarvis/controle/MainActivity.kt <<'JVEOF'
+          package br.local.jarvis.controle
+
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.content.res.ColorStateList
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.text.Editable
+          import android.text.InputType
+          import android.text.TextWatcher
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.inputmethod.InputMethodManager
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
+          import android.widget.Switch
+          import android.widget.TextView
+          import android.widget.Toast
+          import org.json.JSONArray
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.Locale
+          import java.util.concurrent.ExecutorService
+          import java.util.concurrent.Executors
+
+          private val BG = 0xFF070B14.toInt()
+          private val CARD = 0xFF0E1627.toInt()
+          private val FIELD = 0xFF0A1220.toInt()
+          private val LINE = 0xFF1B2A44.toInt()
+          private val ACCENT = 0xFF00E5FF.toInt()
+          private val TEXT = 0xFFE0F7FF.toInt()
+          private val MUTED = 0xFF7F93A8.toInt()
+          private val OK = 0xFF00E676.toInt()
+          private val BAD = 0xFFFF5252.toInt()
+          private val WARN = 0xFFFFC107.toInt()
+
+          private val MODES = arrayOf("off", "append", "replace")
+          private val MODE_LABELS = arrayOf("Desligado", "Somar", "Substituir")
+          private val MODE_DESCS = arrayOf(
+              "O servidor usa só o prompt que o app (celular/TV) enviar. O prompt global fica guardado, mas inativo.",
+              "O prompt global é somado ao prompt do app, no fim dele. Boa opção para regras extras.",
+              "Só o prompt global vale; o prompt de cada app é ignorado. O mesmo comportamento em todos os aparelhos."
+          )
+
+          object Net {
+              class Resp(val code: Int, val body: String)
+
+              fun baseUrl(raw: String): String {
+                  var b = raw.trim().trimEnd('/')
+                  if (b.isEmpty()) return ""
+                  if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b
+                  return b
+              }
+
+              fun open(base: String, path: String, method: String, headers: Map<String, String>, readMs: Int): HttpURLConnection {
+                  val c = URL(baseUrl(base) + path).openConnection() as HttpURLConnection
+                  c.connectTimeout = 10000
+                  c.readTimeout = readMs
+                  c.requestMethod = method
+                  c.setRequestProperty("ngrok-skip-browser-warning", "1")
+                  c.setRequestProperty("Accept-Encoding", "identity")
+                  c.setRequestProperty("User-Agent", "JarvisControle/1.0")
+                  for ((k, v) in headers) c.setRequestProperty(k, v)
+                  return c
+              }
+
+              fun call(base: String, path: String, method: String, headers: Map<String, String>, body: String?): Resp {
+                  val c = open(base, path, method, headers, 30000)
+                  try {
+                      if (body != null) {
+                          c.doOutput = true
+                          c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                          c.outputStream.use { os -> os.write(body.toByteArray(Charsets.UTF_8)) }
+                      }
+                      val code = c.responseCode
+                      val stream = if (code in 200..299) c.inputStream else c.errorStream
+                      val text = if (stream == null) "" else stream.bufferedReader(Charsets.UTF_8).use { r -> r.readText() }
+                      return Resp(code, text)
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+
+              fun detail(r: Resp): String {
+                  val ng = Regex("ERR_NGROK_\\d+").find(r.body)
+                  if (ng != null) return "túnel do ngrok offline (" + ng.value + "): o servidor no Kaggle caiu ou a URL mudou"
+                  try {
+                      val d = JSONObject(r.body).opt("detail")
+                      if (d != null) return d.toString()
+                  } catch (t: Throwable) {
+                  }
+                  return r.body.take(140)
+              }
+          }
+
+          class SliderRef(
+              val key: String,
+              val lo: Double,
+              val step: Double,
+              val isInt: Boolean,
+              val seek: SeekBar,
+              val valueTv: TextView
+          ) {
+              fun value(): Double = Math.round((lo + seek.progress * step) * 1000.0) / 1000.0
+
+              fun set(v: Double) {
+                  val p = Math.round((v - lo) / step).toInt()
+                  seek.progress = Math.max(0, Math.min(seek.max, p))
+                  valueTv.text = label()
+              }
+
+              fun label(): String = if (isInt) value().toInt().toString() else String.format(Locale.US, "%.2f", value())
+          }
+
+          class MainActivity : Activity() {
+              private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+              private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+              private lateinit var prefs: SharedPreferences
+              private val io: ExecutorService = Executors.newCachedThreadPool()
+              private val main = Handler(Looper.getMainLooper())
+
+              private val pageList = ArrayList<View>()
+              private lateinit var tabs: Array<TextView>
+              private var currentTab = 0
+              private var connected = false
+
+              @Volatile private var base = ""
+              @Volatile private var apiKey = ""
+              @Volatile private var adminKey = ""
+
+              private lateinit var urlEt: EditText
+              private lateinit var apiEt: EditText
+              private lateinit var adminEt: EditText
+              private lateinit var connTv: TextView
+              private lateinit var apiTv: TextView
+
+              private lateinit var stHead: TextView
+              private lateinit var stSrv: TextView
+              private lateinit var stGpu: TextView
+              private lateinit var stUse: TextView
+              private lateinit var stLast: TextView
+
+              private lateinit var modeChips: Array<TextView>
+              private lateinit var modeDesc: TextView
+              private var modeIdx = 0
+              private lateinit var promptEt: EditText
+              private lateinit var promptCount: TextView
+              private val sliders = LinkedHashMap<String, SliderRef>()
+              private lateinit var logSw: Switch
+              private lateinit var cfgMsg: TextView
+              private val maxPrompt = 6000
+
+              private lateinit var chatOut: TextView
+              private lateinit var chatScroll: ScrollView
+              private lateinit var chatEt: EditText
+              private lateinit var chatBtn: TextView
+              private var chatBusy = false
+              @Volatile private var chatStopped = false
+              @Volatile private var chatConn: HttpURLConnection? = null
+              private val chatHist = ArrayList<Pair<String, String>>()
+
+              private lateinit var logsOut: TextView
+
+              private val statusTick = object : Runnable {
+                  override fun run() {
+                      if (connected && currentTab == 1) refreshStatus()
+                      if (currentTab == 1) main.postDelayed(this, 10000)
+                  }
+              }
+
+              // ---------------------------------------------------------------- ciclo de vida
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("controle", Context.MODE_PRIVATE)
+                  window.statusBarColor = BG
+                  window.navigationBarColor = CARD
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setBackgroundColor(BG)
+                  val content = FrameLayout(this)
+                  root.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
+
+                  buildConnPage()
+                  buildStatusPage()
+                  buildConfigPage()
+                  buildChatPage()
+                  buildLogsPage()
+                  for (p in pageList) content.addView(p, FrameLayout.LayoutParams(MATCH, MATCH))
+                  root.addView(buildTabBar(), LinearLayout.LayoutParams(MATCH, WRAP))
+                  setContentView(root)
+
+                  urlEt.setText(prefs.getString("url", ""))
+                  apiEt.setText(prefs.getString("api", ""))
+                  adminEt.setText(prefs.getString("admin", ""))
+                  readConnFields()
+
+                  if (base.isNotEmpty() && adminKey.isNotEmpty()) {
+                      showTab(1)
+                      connect()
+                  } else {
+                      showTab(0)
+                  }
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  main.removeCallbacks(statusTick)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (currentTab == 1) {
+                      main.removeCallbacks(statusTick)
+                      main.post(statusTick)
+                  }
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  main.removeCallbacks(statusTick)
+                  io.shutdownNow()
+              }
+
+              // ---------------------------------------------------------------- helpers de UI
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
+
+              private fun onUi(block: () -> Unit) {
+                  runOnUiThread { block() }
+              }
+
+              private fun toast(m: String) {
+                  Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
+              }
+
+              private fun shape(fill: Int, radiusDp: Int, strokeColor: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(fill)
+                  g.cornerRadius = dp(radiusDp).toFloat()
+                  if (strokeColor != 0) g.setStroke(dp(1), strokeColor)
+                  return g
+              }
+
+              private fun text(t: String, size: Float, color: Int, bold: Boolean = false): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.textSize = size
+                  v.setTextColor(color)
+                  if (bold) v.typeface = Typeface.DEFAULT_BOLD
+                  return v
+              }
+
+              private fun addTo(col: LinearLayout, v: View, top: Int) {
+                  val lp = LinearLayout.LayoutParams(MATCH, WRAP)
+                  lp.topMargin = dp(top)
+                  col.addView(v, lp)
+              }
+
+              private fun card(col: LinearLayout, top: Int): LinearLayout {
+                  val c = LinearLayout(this)
+                  c.orientation = LinearLayout.VERTICAL
+                  c.background = shape(CARD, 14, LINE)
+                  c.setPadding(dp(14), dp(12), dp(14), dp(14))
+                  addTo(col, c, top)
+                  return c
+              }
+
+              private fun edit(hint: String, secret: Boolean): EditText {
+                  val e = EditText(this)
+                  e.hint = hint
+                  e.setTextColor(TEXT)
+                  e.setHintTextColor(MUTED)
+                  e.textSize = 14f
+                  e.inputType = if (secret) {
+                      InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  } else {
+                      InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                  }
+                  e.background = shape(FIELD, 10, LINE)
+                  e.setPadding(dp(12), dp(10), dp(12), dp(10))
+                  return e
+              }
+
+              private fun button(label: String, primary: Boolean, onClick: () -> Unit): TextView {
+                  val b = TextView(this)
+                  b.text = label
+                  b.gravity = Gravity.CENTER
+                  b.textSize = 14f
+                  b.typeface = Typeface.DEFAULT_BOLD
+                  b.setTextColor(if (primary) BG else ACCENT)
+                  b.background = if (primary) shape(ACCENT, 12, 0) else shape(0x00000000, 12, ACCENT)
+                  b.setPadding(dp(14), dp(12), dp(14), dp(12))
+                  b.setOnClickListener { onClick() }
+                  return b
+              }
+
+              private fun newPage(): LinearLayout {
+                  val sv = ScrollView(this)
+                  sv.isFillViewport = false
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(16), dp(18), dp(16), dp(24))
+                  sv.addView(col, FrameLayout.LayoutParams(MATCH, WRAP))
+                  pageList.add(sv)
+                  return col
+              }
+
+              private fun hideKeyboard() {
+                  val v = currentFocus ?: return
+                  val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                  imm.hideSoftInputFromWindow(v.windowToken, 0)
+              }
+
+              private fun errMsg(t: Throwable): String {
+                  return when (t) {
+                      is java.net.UnknownHostException -> "não achei o servidor (URL errada ou sem internet)"
+                      is java.net.SocketTimeoutException -> "tempo esgotado esperando o servidor"
+                      is java.net.ConnectException -> "não consegui conectar ao servidor"
+                      is javax.net.ssl.SSLException -> "falha de conexão segura (SSL)"
+                      else -> t.javaClass.simpleName + ": " + (t.message ?: "")
+                  }
+              }
+
+              // ---------------------------------------------------------------- abas
+
+              private fun buildTabBar(): LinearLayout {
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.setBackgroundColor(CARD)
+                  val names = arrayOf("Conexão", "Status", "Config", "Chat", "Logs")
+                  tabs = Array(names.size) { i ->
+                      val t = TextView(this)
+                      t.text = names[i]
+                      t.gravity = Gravity.CENTER
+                      t.textSize = 13f
+                      t.setPadding(0, dp(14), 0, dp(14))
+                      t.setOnClickListener { showTab(i) }
+                      bar.addView(t, LinearLayout.LayoutParams(0, WRAP, 1f))
+                      t
+                  }
+                  return bar
+              }
+
+              private fun showTab(i: Int) {
+                  currentTab = i
+                  for (k in 0 until pageList.size) {
+                      pageList[k].visibility = if (k == i) View.VISIBLE else View.GONE
+                  }
+                  for (k in tabs.indices) {
+                      tabs[k].setTextColor(if (k == i) ACCENT else MUTED)
+                      tabs[k].typeface = if (k == i) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                  }
+                  hideKeyboard()
+                  main.removeCallbacks(statusTick)
+                  if (i == 1) main.post(statusTick)
+                  if (i == 4 && connected) refreshLogs()
+              }
+
+              // ---------------------------------------------------------------- página: conexão
+
+              private fun buildConnPage() {
+                  val col = newPage()
+                  col.addView(text("Jarvis Controle", 26f, ACCENT, true))
+                  addTo(col, text("Administração global da IA na nuvem", 13f, MUTED), 2)
+
+                  val c = card(col, 18)
+                  c.addView(text("URL do servidor (ngrok)", 12f, MUTED))
+                  urlEt = edit("https://xxxx.ngrok-free.dev", false)
+                  addTo(c, urlEt, 4)
+                  addTo(c, text("ADMIN_KEY (só deste app)", 12f, MUTED), 14)
+                  adminEt = edit("chave de admin", true)
+                  addTo(c, adminEt, 4)
+                  addTo(c, text("API_KEY (para o chat de teste)", 12f, MUTED), 14)
+                  apiEt = edit("chave dos apps", true)
+                  addTo(c, apiEt, 4)
+                  addTo(c, button("Salvar e conectar", true) { connect() }, 18)
+
+                  connTv = text("Desconectado", 13f, MUTED)
+                  addTo(col, connTv, 14)
+                  apiTv = text("", 12f, MUTED)
+                  addTo(col, apiTv, 4)
+                  addTo(col, text("As chaves ficam salvas só neste aparelho. Use a ADMIN_KEY apenas aqui, nunca nos apps do celular ou da TV.", 11f, MUTED), 14)
+              }
+
+              private fun readConnFields() {
+                  base = Net.baseUrl(urlEt.text.toString())
+                  apiKey = apiEt.text.toString().trim()
+                  adminKey = adminEt.text.toString().trim()
+              }
+
+              private fun saveConn() {
+                  readConnFields()
+                  prefs.edit()
+                      .putString("url", urlEt.text.toString().trim())
+                      .putString("api", apiKey)
+                      .putString("admin", adminKey)
+                      .apply()
+              }
+
+              private fun setConn(msg: String, color: Int) {
+                  connTv.text = msg
+                  connTv.setTextColor(color)
+              }
+
+              private fun adminHdr(): Map<String, String> = mapOf("X-Admin-Key" to adminKey, "X-Client" to "controle")
+
+              private fun apiHdr(): Map<String, String> = mapOf("X-API-Key" to apiKey, "X-Client" to "controle")
+
+              private fun admin(method: String, path: String, body: JSONObject?, onOk: (JSONObject) -> Unit, onFail: (String) -> Unit) {
+                  val b = base
+                  val hdr = adminHdr()
+                  val payload = body?.toString()
+                  io.execute {
+                      try {
+                          val r = Net.call(b, path, method, hdr, payload)
+                          if (r.code in 200..299) {
+                              val j = if (r.body.isBlank()) JSONObject() else JSONObject(r.body)
+                              onUi {
+                                  try {
+                                      onOk(j)
+                                  } catch (t: Throwable) {
+                                      onFail("resposta inesperada: " + errMsg(t))
+                                  }
+                              }
+                          } else {
+                              val d = "HTTP " + r.code + ": " + Net.detail(r)
+                              onUi { onFail(d) }
+                          }
+                      } catch (t: Throwable) {
+                          val m = errMsg(t)
+                          onUi { onFail(m) }
+                      }
+                  }
+              }
+
+              private fun connect() {
+                  saveConn()
+                  if (base.isEmpty() || adminKey.isEmpty()) {
+                      setConn("Preencha a URL e a ADMIN_KEY.", BAD)
+                      return
+                  }
+                  setConn("Conectando…", MUTED)
+                  admin("GET", "/admin/config", null, { j -> onConnected(j) }, { m ->
+                      connected = false
+                      setConn("Falhou: " + m, BAD)
+                  })
+                  checkApiKey()
+              }
+
+              private fun checkApiKey() {
+                  if (apiKey.isEmpty()) {
+                      apiTv.text = "API_KEY não informada: o chat de teste fica desativado."
+                      apiTv.setTextColor(WARN)
+                      return
+                  }
+                  val b = base
+                  val hdr = apiHdr()
+                  io.execute {
+                      var msg = ""
+                      var color = MUTED
+                      try {
+                          val r = Net.call(b, "/health", "GET", hdr, null)
+                          if (r.code == 200) {
+                              msg = "API_KEY válida ✓"
+                              color = OK
+                          } else {
+                              msg = "API_KEY recusada (HTTP " + r.code + ")"
+                              color = BAD
+                          }
+                      } catch (t: Throwable) {
+                          msg = "API_KEY não testada: " + errMsg(t)
+                          color = WARN
+                      }
+                      val m = msg
+                      val c = color
+                      onUi {
+                          apiTv.text = m
+                          apiTv.setTextColor(c)
+                      }
+                  }
+              }
+
+              private fun onConnected(j: JSONObject) {
+                  connected = true
+                  setConn("Conectado ✓  (config v" + j.optInt("version") + ")", OK)
+                  val cfg = j.getJSONObject("config")
+                  val pad = j.optJSONObject("padrao")
+                  val backup = prefs.getString("backup", null)
+                  applyConfig(cfg, false)
+                  if (backup != null && pad != null && sameConfig(cfg, pad) && !sameConfig(JSONObject(backup), pad)) {
+                      AlertDialog.Builder(this)
+                          .setTitle("Restaurar sua configuração?")
+                          .setMessage("O servidor está com a configuração padrão (provavelmente a sessão do Kaggle reiniciou). Quer reenviar a última configuração salva neste aparelho?")
+                          .setCancelable(false)
+                          .setPositiveButton("Restaurar") { _, _ -> putConfig(JSONObject(backup)) }
+                          .setNegativeButton("Manter padrão") { _, _ -> prefs.edit().putString("backup", cfg.toString()).apply() }
+                          .show()
+                  } else {
+                      prefs.edit().putString("backup", cfg.toString()).apply()
+                  }
+                  if (currentTab == 1) refreshStatus()
+              }
+
+              private fun sameConfig(a: JSONObject, b: JSONObject): Boolean {
+                  val keys = arrayOf("prompt_mode", "system_prompt", "temperature", "top_p", "top_k", "max_new_tokens", "repetition_penalty", "max_history_turns", "log_content")
+                  for (k in keys) {
+                      if (a.opt(k).toString() != b.opt(k).toString()) return false
+                  }
+                  return true
+              }
+
+              // ---------------------------------------------------------------- página: status
+
+              private fun buildStatusPage() {
+                  val col = newPage()
+                  col.addView(text("Status do servidor", 22f, ACCENT, true))
+                  stHead = text("● aguardando conexão", 13f, MUTED, true)
+                  addTo(col, stHead, 4)
+
+                  val c1 = card(col, 14)
+                  c1.addView(text("SERVIDOR", 11f, MUTED, true))
+                  stSrv = text("—", 13f, TEXT)
+                  stSrv.typeface = Typeface.MONOSPACE
+                  addTo(c1, stSrv, 6)
+
+                  val c2 = card(col, 12)
+                  c2.addView(text("GPUs", 11f, MUTED, true))
+                  stGpu = text("—", 13f, TEXT)
+                  stGpu.typeface = Typeface.MONOSPACE
+                  addTo(c2, stGpu, 6)
+
+                  val c3 = card(col, 12)
+                  c3.addView(text("USO", 11f, MUTED, true))
+                  stUse = text("—", 13f, TEXT)
+                  stUse.typeface = Typeface.MONOSPACE
+                  addTo(c3, stUse, 6)
+
+                  val c4 = card(col, 12)
+                  c4.addView(text("ÚLTIMO PEDIDO", 11f, MUTED, true))
+                  stLast = text("—", 12f, TEXT)
+                  stLast.typeface = Typeface.MONOSPACE
+                  addTo(c4, stLast, 6)
+
+                  addTo(col, button("Atualizar agora", false) { refreshStatus() }, 14)
+                  addTo(col, text("Atualiza sozinho a cada 10 segundos enquanto esta aba estiver aberta.", 11f, MUTED), 8)
+              }
+
+              private fun refreshStatus() {
+                  if (!connected) {
+                      stHead.text = "● desconectado (veja a aba Conexão)"
+                      stHead.setTextColor(MUTED)
+                      return
+                  }
+                  admin("GET", "/admin/status", null, { j -> renderStatus(j) }, { m ->
+                      stHead.text = "● sem resposta: " + m
+                      stHead.setTextColor(BAD)
+                  })
+              }
+
+              private fun fmtUptime(s: Long): String {
+                  val h = s / 3600
+                  val m = (s % 3600) / 60
+                  return if (h > 0) h.toString() + "h " + m + "min" else m.toString() + "min " + (s % 60) + "s"
+              }
+
+              private fun f1(x: Double): String = String.format(Locale.US, "%.1f", x)
+
+              private fun renderStatus(j: JSONObject) {
+                  stHead.text = "● Online"
+                  stHead.setTextColor(OK)
+                  val url = if (j.isNull("url_publica")) "—" else j.optString("url_publica", "—")
+                  stSrv.text = "Modelo  " + j.optString("model") + " (" + j.optString("quant") + ")\n" +
+                      "Versão  " + j.optString("versao") + "\n" +
+                      "No ar   " + fmtUptime(j.optLong("uptime_s", 0L)) + "\n" +
+                      "Config  v" + j.optInt("config_version") + "\n" +
+                      "URL     " + url
+
+                  val sb = StringBuilder()
+                  val gpus = j.optJSONArray("gpus")
+                  if (gpus != null) {
+                      for (i in 0 until gpus.length()) {
+                          val g = gpus.getJSONObject(i)
+                          val used = g.optDouble("usado_gb", 0.0)
+                          val total = g.optDouble("total_gb", 1.0)
+                          var frac = if (total > 0) used / total else 0.0
+                          if (frac > 1.0) frac = 1.0
+                          val filled = Math.round(frac * 10).toInt()
+                          if (i > 0) sb.append("\n\n")
+                          sb.append("GPU ").append(g.optInt("id")).append("  ").append(g.optString("nome")).append("\n")
+                          sb.append("█".repeat(filled)).append("░".repeat(10 - filled)).append("  ")
+                          sb.append(f1(used)).append(" / ").append(f1(total)).append(" GB")
+                      }
+                  }
+                  stGpu.text = if (sb.isEmpty()) "—" else sb.toString()
+
+                  val busy = j.optBoolean("ocupado", false)
+                  stUse.text = "Requisições  " + j.optInt("requisicoes") + "\n" +
+                      "Erros        " + j.optInt("erros") + "\n" +
+                      "Tokens       " + j.optLong("tokens_saida", 0L) + "\n" +
+                      "Estado       " + (if (busy) "gerando" else "livre") + "  ·  fila " + j.optInt("fila")
+
+                  val u = j.optJSONObject("ultimo")
+                  stLast.text = if (u == null) "Nenhum pedido ainda." else fmtLog(u)
+              }
+
+              // ---------------------------------------------------------------- página: config
+
+              private fun buildConfigPage() {
+                  val col = newPage()
+                  col.addView(text("Configuração global", 22f, ACCENT, true))
+                  addTo(col, text("Vale para todos os apps (celular e TV).", 13f, MUTED), 2)
+
+                  val c1 = card(col, 16)
+                  c1.addView(text("PROMPT GLOBAL", 11f, MUTED, true))
+                  val chipRow = LinearLayout(this)
+                  chipRow.orientation = LinearLayout.HORIZONTAL
+                  modeChips = Array(MODES.size) { i ->
+                      val t = TextView(this)
+                      t.text = MODE_LABELS[i]
+                      t.gravity = Gravity.CENTER
+                      t.textSize = 12f
+                      t.setPadding(dp(6), dp(9), dp(6), dp(9))
+                      t.setOnClickListener { setMode(i) }
+                      val lp = LinearLayout.LayoutParams(0, WRAP, 1f)
+                      lp.rightMargin = if (i < MODES.size - 1) dp(6) else 0
+                      chipRow.addView(t, lp)
+                      t
+                  }
+                  addTo(c1, chipRow, 8)
+                  modeDesc = text("", 11f, MUTED)
+                  addTo(c1, modeDesc, 6)
+                  promptEt = EditText(this)
+                  promptEt.setTextColor(TEXT)
+                  promptEt.setHintTextColor(MUTED)
+                  promptEt.hint = "Ex.: Responda sempre em português do Brasil, de forma curta e direta."
+                  promptEt.textSize = 13f
+                  promptEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                  promptEt.minLines = 6
+                  promptEt.gravity = Gravity.TOP or Gravity.START
+                  promptEt.background = shape(FIELD, 10, LINE)
+                  promptEt.setPadding(dp(12), dp(10), dp(12), dp(10))
+                  promptEt.addTextChangedListener(object : TextWatcher {
+                      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                          updatePromptCount()
+                      }
+                      override fun afterTextChanged(s: Editable?) {}
+                  })
+                  addTo(c1, promptEt, 8)
+                  promptCount = text("0/" + maxPrompt, 11f, MUTED)
+                  promptCount.gravity = Gravity.END
+                  addTo(c1, promptCount, 4)
+
+                  val c2 = card(col, 12)
+                  c2.addView(text("GERAÇÃO", 11f, MUTED, true))
+                  addSlider(c2, "temperature", "Temperatura", 0.1, 1.5, 0.05, false, "Menor = mais objetivo. Maior = mais criativo.")
+                  addSlider(c2, "top_p", "Top-p", 0.1, 1.0, 0.05, false, "Limita as palavras candidatas por probabilidade acumulada.")
+                  addSlider(c2, "top_k", "Top-k", 1.0, 200.0, 1.0, true, "Quantas palavras candidatas o modelo considera por passo.")
+                  addSlider(c2, "max_new_tokens", "Tamanho máximo da resposta", 16.0, 512.0, 8.0, true, "Em tokens. O app só pode pedir menos que isso.")
+                  addSlider(c2, "repetition_penalty", "Penalidade de repetição", 1.0, 1.5, 0.01, false, "Acima de 1.00 evita que ele repita as mesmas frases.")
+                  addSlider(c2, "max_history_turns", "Memória da conversa", 0.0, 20.0, 1.0, true, "Quantas trocas (pergunta + resposta) entram no prompt.")
+
+                  val c3 = card(col, 12)
+                  c3.addView(text("LOGS", 11f, MUTED, true))
+                  logSw = Switch(this)
+                  logSw.text = "Guardar o início das mensagens nos logs"
+                  logSw.setTextColor(TEXT)
+                  logSw.textSize = 13f
+                  addTo(c3, logSw, 8)
+                  addTo(c3, text("Desligado: o log mostra só tempos e tokens, nunca o texto.", 11f, MUTED), 4)
+
+                  addTo(col, button("Enviar ao servidor", true) { sendConfig() }, 16)
+                  addTo(col, button("Recarregar do servidor", false) { reloadConfig() }, 10)
+                  addTo(col, button("Restaurar padrão", false) { confirmReset() }, 10)
+                  cfgMsg = text("", 12f, MUTED)
+                  addTo(col, cfgMsg, 12)
+
+                  setMode(0)
+                  for ((_, ref) in sliders) ref.valueTv.text = ref.label()
+              }
+
+              private fun addSlider(parent: LinearLayout, key: String, label: String, lo: Double, hi: Double, step: Double, isInt: Boolean, hint: String) {
+                  val head = LinearLayout(this)
+                  head.orientation = LinearLayout.HORIZONTAL
+                  head.addView(text(label, 13f, TEXT), LinearLayout.LayoutParams(0, WRAP, 1f))
+                  val valueTv = text("", 13f, ACCENT, true)
+                  head.addView(valueTv, LinearLayout.LayoutParams(WRAP, WRAP))
+                  addTo(parent, head, 16)
+                  val seek = SeekBar(this)
+                  seek.max = Math.round((hi - lo) / step).toInt()
+                  seek.progressTintList = ColorStateList.valueOf(ACCENT)
+                  seek.thumbTintList = ColorStateList.valueOf(ACCENT)
+                  val ref = SliderRef(key, lo, step, isInt, seek, valueTv)
+                  valueTv.text = ref.label()
+                  seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                      override fun onProgressChanged(sb: SeekBar?, p: Int, fromUser: Boolean) {
+                          valueTv.text = ref.label()
+                      }
+                      override fun onStartTrackingTouch(sb: SeekBar?) {}
+                      override fun onStopTrackingTouch(sb: SeekBar?) {}
+                  })
+                  addTo(parent, seek, 0)
+                  addTo(parent, text(hint, 11f, MUTED), 0)
+                  sliders[key] = ref
+              }
+
+              private fun setMode(i: Int) {
+                  modeIdx = i
+                  for (k in modeChips.indices) {
+                      val sel = k == i
+                      modeChips[k].setTextColor(if (sel) BG else ACCENT)
+                      modeChips[k].background = if (sel) shape(ACCENT, 10, 0) else shape(0x00000000, 10, LINE)
+                      modeChips[k].typeface = if (sel) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+                  }
+                  modeDesc.text = MODE_DESCS[i]
+              }
+
+              private fun updatePromptCount() {
+                  val n = promptEt.text.length
+                  promptCount.text = n.toString() + "/" + maxPrompt
+                  promptCount.setTextColor(if (n > maxPrompt) BAD else MUTED)
+              }
+
+              private fun applyConfig(cfg: JSONObject, saveBackup: Boolean) {
+                  val idx = MODES.indexOf(cfg.optString("prompt_mode", "off"))
+                  setMode(if (idx >= 0) idx else 0)
+                  promptEt.setText(cfg.optString("system_prompt", ""))
+                  for ((key, ref) in sliders) {
+                      if (cfg.has(key)) ref.set(cfg.optDouble(key))
+                  }
+                  logSw.isChecked = cfg.optBoolean("log_content", false)
+                  updatePromptCount()
+                  if (saveBackup) prefs.edit().putString("backup", cfg.toString()).apply()
+              }
+
+              private fun collectConfig(): JSONObject {
+                  val o = JSONObject()
+                  o.put("prompt_mode", MODES[modeIdx])
+                  o.put("system_prompt", promptEt.text.toString())
+                  for ((key, ref) in sliders) {
+                      if (ref.isInt) o.put(key, ref.value().toInt()) else o.put(key, ref.value())
+                  }
+                  o.put("log_content", logSw.isChecked)
+                  return o
+              }
+
+              private fun needConnection(): Boolean {
+                  if (!connected) {
+                      cfgMsg.text = "Conecte primeiro (aba Conexão)."
+                      cfgMsg.setTextColor(BAD)
+                      return true
+                  }
+                  return false
+              }
+
+              private fun sendConfig() {
+                  if (needConnection()) return
+                  if (promptEt.text.length > maxPrompt) {
+                      cfgMsg.text = "O prompt passa de " + maxPrompt + " caracteres."
+                      cfgMsg.setTextColor(BAD)
+                      return
+                  }
+                  hideKeyboard()
+                  putConfig(collectConfig())
+              }
+
+              private fun putConfig(body: JSONObject) {
+                  cfgMsg.text = "Enviando…"
+                  cfgMsg.setTextColor(MUTED)
+                  admin("PUT", "/admin/config", body, { j ->
+                      val cfg = j.getJSONObject("config")
+                      applyConfig(cfg, true)
+                      val sb = StringBuilder("Salvo no servidor ✓  (config v" + j.optInt("version") + ")")
+                      val av = j.optJSONArray("avisos")
+                      if (av != null) {
+                          for (i in 0 until av.length()) sb.append("\n• ").append(av.optString(i))
+                      }
+                      cfgMsg.text = sb.toString()
+                      cfgMsg.setTextColor(OK)
+                  }, { m ->
+                      cfgMsg.text = "Falhou: " + m
+                      cfgMsg.setTextColor(BAD)
+                  })
+              }
+
+              private fun reloadConfig() {
+                  if (needConnection()) return
+                  cfgMsg.text = "Carregando…"
+                  cfgMsg.setTextColor(MUTED)
+                  admin("GET", "/admin/config", null, { j ->
+                      applyConfig(j.getJSONObject("config"), true)
+                      cfgMsg.text = "Config recarregada do servidor ✓"
+                      cfgMsg.setTextColor(OK)
+                  }, { m ->
+                      cfgMsg.text = "Falhou: " + m
+                      cfgMsg.setTextColor(BAD)
+                  })
+              }
+
+              private fun confirmReset() {
+                  if (needConnection()) return
+                  AlertDialog.Builder(this)
+                      .setTitle("Restaurar padrão?")
+                      .setMessage("Isso apaga o prompt global e volta todos os ajustes para o padrão do servidor.")
+                      .setPositiveButton("Restaurar") { _, _ ->
+                          admin("POST", "/admin/config/reset", JSONObject(), { j ->
+                              applyConfig(j.getJSONObject("config"), true)
+                              cfgMsg.text = "Padrão restaurado ✓"
+                              cfgMsg.setTextColor(OK)
+                          }, { m ->
+                              cfgMsg.text = "Falhou: " + m
+                              cfgMsg.setTextColor(BAD)
+                          })
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+
+              // ---------------------------------------------------------------- página: chat de teste
+
+              private fun buildChatPage() {
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(16), dp(18), dp(16), dp(10))
+
+                  val head = LinearLayout(this)
+                  head.orientation = LinearLayout.HORIZONTAL
+                  head.gravity = Gravity.CENTER_VERTICAL
+                  head.addView(text("Chat de teste", 22f, ACCENT, true), LinearLayout.LayoutParams(0, WRAP, 1f))
+                  head.addView(button("Limpar", false) {
+                      chatOut.text = ""
+                      chatHist.clear()
+                  }, LinearLayout.LayoutParams(WRAP, WRAP))
+                  root.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+
+                  val info = text("Testa o servidor sem prompt de app: só vale o prompt global (modo Somar ou Substituir).", 12f, MUTED)
+                  addTo(root, info, 4)
+
+                  chatScroll = ScrollView(this)
+                  chatScroll.background = shape(CARD, 14, LINE)
+                  chatOut = text("", 14f, TEXT)
+                  chatOut.setPadding(dp(14), dp(12), dp(14), dp(12))
+                  chatScroll.addView(chatOut, FrameLayout.LayoutParams(MATCH, WRAP))
+                  val slp = LinearLayout.LayoutParams(MATCH, 0, 1f)
+                  slp.topMargin = dp(12)
+                  root.addView(chatScroll, slp)
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.gravity = Gravity.CENTER_VERTICAL
+                  chatEt = EditText(this)
+                  chatEt.hint = "Escreva uma mensagem…"
+                  chatEt.setTextColor(TEXT)
+                  chatEt.setHintTextColor(MUTED)
+                  chatEt.textSize = 14f
+                  chatEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                  chatEt.maxLines = 4
+                  chatEt.background = shape(FIELD, 10, LINE)
+                  chatEt.setPadding(dp(12), dp(10), dp(12), dp(10))
+                  row.addView(chatEt, LinearLayout.LayoutParams(0, WRAP, 1f))
+                  chatBtn = button("Enviar", true) { sendChat() }
+                  val blp = LinearLayout.LayoutParams(WRAP, WRAP)
+                  blp.leftMargin = dp(8)
+                  row.addView(chatBtn, blp)
+                  addTo(root, row, 10)
+
+                  pageList.add(root)
+              }
+
+              private fun scrollChat() {
+                  chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+              }
+
+              private fun sendChat() {
+                  if (chatBusy) {
+                      stopChat()
+                      return
+                  }
+                  val msg = chatEt.text.toString().trim()
+                  if (msg.isEmpty()) return
+                  if (base.isEmpty() || apiKey.isEmpty()) {
+                      toast("Preencha a URL e a API_KEY na aba Conexão.")
+                      return
+                  }
+                  chatEt.setText("")
+                  hideKeyboard()
+                  chatOut.append("Você: " + msg + "\n\nJarvis: ")
+                  scrollChat()
+                  chatBusy = true
+                  chatStopped = false
+                  chatBtn.text = "Parar"
+
+                  val body = JSONObject()
+                  body.put("message", msg)
+                  body.put("system", "")
+                  val ha = JSONArray()
+                  val from = Math.max(0, chatHist.size - 8)
+                  for (k in from until chatHist.size) {
+                      val o = JSONObject()
+                      o.put("role", chatHist[k].first)
+                      o.put("content", chatHist[k].second)
+                      ha.put(o)
+                  }
+                  body.put("history", ha)
+                  body.put("max_new_tokens", 512)
+                  val payload = body.toString()
+                  val b = base
+                  val hdr = apiHdr()
+
+                  io.execute {
+                      val sb = StringBuilder()
+                      var err: String? = null
+                      var statsTxt = ""
+                      var conn: HttpURLConnection? = null
+                      try {
+                          val cc = Net.open(b, "/chat", "POST", hdr, 120000)
+                          conn = cc
+                          chatConn = cc
+                          cc.doOutput = true
+                          cc.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                          cc.setRequestProperty("Accept", "text/event-stream")
+                          cc.outputStream.use { os -> os.write(payload.toByteArray(Charsets.UTF_8)) }
+                          val code = cc.responseCode
+                          if (code != 200) {
+                              val txt = cc.errorStream?.bufferedReader(Charsets.UTF_8)?.use { r -> r.readText() } ?: ""
+                              err = "HTTP " + code + ": " + Net.detail(Net.Resp(code, txt))
+                          } else {
+                              cc.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                                  while (true) {
+                                      val line = r.readLine() ?: break
+                                      if (!line.startsWith("data:")) continue
+                                      val js = JSONObject(line.substring(5).trim())
+                                      if (js.has("error")) {
+                                          err = js.optString("error")
+                                          break
+                                      }
+                                      val piece = js.optString("t", "")
+                                      if (piece.isNotEmpty()) {
+                                          sb.append(piece)
+                                          onUi {
+                                              chatOut.append(piece)
+                                              scrollChat()
+                                          }
+                                      }
+                                      if (js.optBoolean("done", false)) {
+                                          statsTxt = js.optInt("tokens").toString() + " tokens · " + f1(js.optDouble("secs", 0.0)) + "s"
+                                          break
+                                      }
+                                  }
+                              }
+                          }
+                      } catch (t: Throwable) {
+                          if (!chatStopped) err = errMsg(t)
+                      } finally {
+                          try {
+                              conn?.disconnect()
+                          } catch (t: Throwable) {
+                          }
+                          chatConn = null
+                      }
+                      val errF = err
+                      val statsF = statsTxt
+                      val replyF = sb.toString()
+                      onUi { finishChat(msg, replyF, errF, statsF) }
+                  }
+              }
+
+              private fun stopChat() {
+                  chatStopped = true
+                  val c = chatConn
+                  io.execute {
+                      try {
+                          c?.disconnect()
+                      } catch (t: Throwable) {
+                      }
+                  }
+              }
+
+              private fun finishChat(userMsg: String, reply: String, err: String?, stats: String) {
+                  chatBusy = false
+                  chatBtn.text = "Enviar"
+                  if (err != null) {
+                      chatOut.append("\n⚠ " + err + "\n\n")
+                  } else if (chatStopped) {
+                      chatOut.append("\n[parado]\n\n")
+                  } else {
+                      chatOut.append("\n— " + stats + " —\n\n")
+                      chatHist.add(Pair("user", userMsg))
+                      chatHist.add(Pair("assistant", reply))
+                  }
+                  scrollChat()
+              }
+
+              // ---------------------------------------------------------------- página: logs
+
+              private fun buildLogsPage() {
+                  val col = newPage()
+                  col.addView(text("Logs", 22f, ACCENT, true))
+                  addTo(col, text("Últimas 100 requisições ao servidor (mais recentes primeiro).", 12f, MUTED), 2)
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  val b1 = button("Atualizar", true) { refreshLogs() }
+                  val b2 = button("Limpar logs", false) { confirmClearLogs() }
+                  val lp1 = LinearLayout.LayoutParams(0, WRAP, 1f)
+                  lp1.rightMargin = dp(8)
+                  row.addView(b1, lp1)
+                  row.addView(b2, LinearLayout.LayoutParams(0, WRAP, 1f))
+                  addTo(col, row, 14)
+                  val c = card(col, 14)
+                  logsOut = text("—", 12f, TEXT)
+                  logsOut.typeface = Typeface.MONOSPACE
+                  c.addView(logsOut)
+              }
+
+              private fun fmtLog(e: JSONObject): String {
+                  val h = e.optString("hora", "")
+                  val hora = if (h.length >= 19) h.substring(11, 19) else h
+                  val ok = e.optBoolean("ok", true)
+                  val sb = StringBuilder()
+                  sb.append(hora).append("  ").append(e.optString("cliente", "?")).append("  ").append(if (ok) "✓" else "✗")
+                  sb.append("  ").append(e.optInt("tokens_saida")).append(" tok  ")
+                  sb.append(f1(e.optDouble("tok_s", 0.0))).append(" tok/s  ")
+                  sb.append(f1(e.optDouble("total_s", 0.0))).append("s")
+                  if (!e.isNull("primeiro_token_s")) sb.append("  1º token ").append(f1(e.optDouble("primeiro_token_s", 0.0))).append("s")
+                  if (!e.isNull("erro")) sb.append("\n   ⚠ ").append(e.optString("erro"))
+                  if (!e.isNull("msg")) sb.append("\n   “").append(e.optString("msg")).append("”")
+                  return sb.toString()
+              }
+
+              private fun refreshLogs() {
+                  if (!connected) {
+                      logsOut.text = "Conecte primeiro (aba Conexão)."
+                      return
+                  }
+                  admin("GET", "/admin/logs?n=100", null, { j ->
+                      val arr = j.optJSONArray("logs")
+                      if (arr == null || arr.length() == 0) {
+                          logsOut.text = "Nenhuma requisição ainda."
+                      } else {
+                          val sb = StringBuilder()
+                          var i = arr.length() - 1
+                          while (i >= 0) {
+                              if (sb.isNotEmpty()) sb.append("\n\n")
+                              sb.append(fmtLog(arr.getJSONObject(i)))
+                              i--
+                          }
+                          logsOut.text = sb.toString()
+                      }
+                  }, { m -> logsOut.text = "Falhou: " + m })
+              }
+
+              private fun confirmClearLogs() {
+                  if (!connected) return
+                  AlertDialog.Builder(this)
+                      .setTitle("Limpar logs?")
+                      .setMessage("Apaga o histórico de requisições guardado no servidor.")
+                      .setPositiveButton("Limpar") { _, _ ->
+                          admin("POST", "/admin/logs/clear", JSONObject(), { _ -> refreshLogs() }, { m -> toast("Falhou: " + m) })
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .show()
+              }
+          }
+          JVEOF
+
+          echo "Arquivos criados:"
+          find controle -type f | sort
+
+      - name: Instalar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+
+      - name: Instalar Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+
+      - name: Compilar o APK
+        working-directory: controle
+        run: |
+          set +e
+          gradle --no-daemon --console=plain assembleDebug > build.log 2>&1
+          code=$?
+          echo "gradle terminou com codigo $code"
+          if [ $code -ne 0 ]; then
+            echo "=============== RESUMO DOS ERROS ==============="
+            grep -E "^e: |What went wrong|Execution failed|Could not|requires|incompatible|Caused by|error:" -A4 build.log | head -n 70
+            echo "------ ultimas linhas ------"
+            tail -n 25 build.log
+            echo "================================================"
+          fi
+          exit $code
+
+      - name: Preparar o APK
+        run: |
+          mkdir -p out
+          cp controle/app/build/outputs/apk/debug/app-debug.apk out/Jarvis-Controle-${{ github.run_number }}.apk
+          ls -la out
+
+      - name: Guardar como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Controle-APK
+          path: out/*.apk
+
+      - name: Publicar como Release
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: controle-${{ github.run_number }}
+          name: Jarvis Controle build ${{ github.run_number }}
+          files: out/*.apk
