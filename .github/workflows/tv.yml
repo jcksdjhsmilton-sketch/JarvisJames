@@ -175,7 +175,8 @@ jobs:
           object JarvisWeb {
               private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
               private const val API_UA = "JarvisLocal/2.0 (assistente pessoal Android)"
-              private const val MAX_CHARS = 4000
+              private const val MAX_CHARS = 12000
+              private const val PAGE_CHARS = 10000
 
               fun norm(s: String): String {
                   val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
@@ -250,14 +251,14 @@ jobs:
                   val rule = when (mode) {
                       WebMode.WEATHER -> "Responda de forma natural, citando a temperatura atual, a mínima, a máxima e a chance de chuva, em até 3 frases curtas."
                       WebMode.NEWS -> "Resuma as principais manchetes em até 3 frases curtas."
-                      else -> "Responda direto à pergunta usando apenas as informações acima. Se o dado pedido (data, número, nome) aparecer nos trechos, diga-o. Se não aparecer, diga que não encontrou essa informação na internet e não invente valores."
+                      else -> "O texto acima é o conteúdo completo da página que foi aberta. Leia tudo, procure nele o dado exato que o usuário pediu (data, número, nome, valor) e responda direto, em 1 a 3 frases. Se o dado realmente não aparecer em nenhum trecho, diga que não encontrou na página e não invente valores."
                   }
                   return head + " (" + now + "):\n" + ctx.text + "\n" + rule +
                       " Fale em português do Brasil, sem listas, sem markdown e sem links.\nPergunta do usuário: " + question
               }
 
               suspend fun fetch(mode: WebMode, raw: String, savedCity: String, log: (String) -> Unit): WebCtx? {
-                  return withTimeout(if (mode == WebMode.GENERAL) 24000L else 16000L) {
+                  return withTimeout(if (mode == WebMode.GENERAL) 34000L else 16000L) {
                       when (mode) {
                           WebMode.WEATHER -> weatherCtx(raw, savedCity, log)
                           WebMode.NEWS -> newsCtx(raw, log)
@@ -275,6 +276,20 @@ jobs:
                   return if (k.length < 3) q else k
               }
 
+          // Extrai SÓ o assunto/dado pedido (nunca a frase inteira do usuário).
+          // "me fala qual é a data de nascimento do YouTuber jazzghost" -> "data nascimento youtuber jazzghost"
+          private val LEAD = setOf("por","favor","me","pode","poderia","consegue","voce","sabe","quero","queria","gostaria","saber","diga","dizer","fala","falar","fale","conta","conte","informa","informar","mostra","mostrar","descubra","veja","ve","eu","qual","quais","quem","quando","onde","quanto","quantos","quantas","como","que","o","a","os","as","e","eh","foi","era","sao","ser","um","uma","tipo","pra","para","ai","ei","ola","oi","de","do","da")
+          private val CONN = setOf("de","do","da","dos","das","no","na","nos","nas","em","o","a","os","as","um","uma","e","eh","que","pra","para","me","voce","por")
+
+          fun searchQuery(raw: String): String {
+              val base = norm(cleanQuery(raw))
+              val t = base.split(" ").filter { it.isNotEmpty() }.toMutableList()
+              while (t.isNotEmpty() && t[0] in LEAD) t.removeAt(0)
+              val core = t.filter { it !in CONN }.joinToString(" ").trim()
+              if (core.length >= 3) return core
+              val kw = keywordQuery(base)
+              return if (kw.length >= 3) kw else base
+          }
               // ---------- rede ----------
 
               private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
@@ -357,43 +372,61 @@ jobs:
                   return sb.toString()
               }
 
-              private val skipHosts = listOf("youtube.", "youtu.be", "facebook.", "instagram.", "twitter.", "x.com", "tiktok.", "google.", "bing.", "pinterest.", "linkedin.", "reddit.")
+              private val skipHosts = listOf("google.", "bing.")
 
-              private fun pageOk(url: String): Boolean {
-                  if (!url.startsWith("http")) return false
-                  val u = url.lowercase()
-                  if (u.contains(".pdf") || u.contains(".mp4")) return false
-                  for (h in skipHosts) if (u.contains(h)) return false
-                  return true
+          private fun pageOk(url: String): Boolean {
+              if (!url.startsWith("http")) return false
+              val u = url.lowercase()
+              if (u.contains(".pdf") || u.contains(".mp4") || u.contains(".jpg") || u.contains(".png")) return false
+              for (h in skipHosts) if (u.contains(h)) return false
+              return true
+          }
+
+          // Lê a página INTEIRA (nada de nav/aside/footer descartado, sem filtro de frases).
+          // Se o texto couber no orçamento, vai tudo. Se for maior que o contexto do modelo,
+          // mantém os trechos que mais batem com o dado pedido, na ordem original da página.
+          private fun pageText(url: String, q: String, budget: Int): String {
+              val html = http(url, "GET", null, UA, "text/html,application/xhtml+xml", false)
+              val bi = html.indexOf("<body")
+              var body = if (bi > 0) html.substring(bi) else html
+              body = body.replace(Regex("(?is)<(script|style|noscript|svg|template|iframe)\\b[^>]*>.*?</\\1>"), " ")
+              val text = clean(body)
+              if (text.length < 80) return ""
+              if (text.length <= budget) return text
+              val kw = norm(q).split(" ").filter { it.length >= 3 }.toSet()
+              val parts = ArrayList<String>()
+              for (s in text.split(Regex("(?<=[.!?])\\s+"))) {
+                  if (s.length > 600) { for (c in s.chunked(500)) parts.add(c) } else parts.add(s)
               }
-
-              private fun pageText(url: String, q: String): String {
-                  val html = http(url, "GET", null, UA, "text/html,application/xhtml+xml", true).take(300000)
-                  val bi = html.indexOf("<body")
-                  var body = if (bi > 0) html.substring(bi) else html
-                  body = body.replace(Regex("(?is)<(nav|footer|header|aside|form|noscript|svg)\\b[^>]*>.*?</\\1>"), " ")
-                  val text = clean(body)
-                  if (text.length < 80) return ""
-                  val kw = norm(q).split(" ").filter { it.length >= 4 }.toSet()
-                  val sents = text.split(Regex("(?<=[.!?])\\s+")).filter { it.length in 40..420 }
-                  val scored = ArrayList<Pair<Int, Int>>()
-                  for (i in sents.indices) {
-                      val ns = norm(sents[i])
-                      var sc = 0
-                      for (k in kw) if (ns.contains(k)) sc++
-                      if (sc > 0) scored.add(Pair(sc, i))
-                  }
-                  val pick = if (scored.isEmpty()) sents.take(4).indices.toList()
-                             else scored.sortedWith(compareByDescending<Pair<Int, Int>> { it.first }.thenBy { it.second }).take(5).map { it.second }.sorted()
-                  val sb = StringBuilder()
-                  for (i in pick) {
-                      if (sb.length + sents[i].length > 1100) break
-                      sb.append(sents[i]).append(" ")
-                  }
-                  return sb.toString().trim()
+              val chunks = ArrayList<String>()
+              val cur = StringBuilder()
+              for (s in parts) {
+                  if (cur.length + s.length > 500 && cur.isNotEmpty()) { chunks.add(cur.toString().trim()); cur.setLength(0) }
+                  cur.append(s).append(' ')
               }
-
-              // ---------- buscadores ----------
+              if (cur.isNotEmpty()) chunks.add(cur.toString().trim())
+              val scored = ArrayList<Pair<Int, Int>>()
+              for (i in chunks.indices) {
+                  val ns = norm(chunks[i])
+                  var sc = 0
+                  for (k in kw) if (ns.contains(k)) sc++
+                  scored.add(Pair(sc, i))
+              }
+              val chosen = java.util.TreeSet<Int>()
+              var used = 0
+              if (chunks.isNotEmpty()) { chosen.add(0); used += chunks[0].length + 1 }
+              for (pr in scored.sortedWith(compareByDescending<Pair<Int, Int>> { it.first }.thenBy { it.second })) {
+                  if (chosen.contains(pr.second)) continue
+                  val len = chunks[pr.second].length + 1
+                  if (used + len > budget) continue
+                  chosen.add(pr.second)
+                  used += len
+              }
+              val sb = StringBuilder()
+              for (i in chosen) sb.append(chunks[i]).append(' ')
+              return sb.toString().trim()
+          }
+          // ---------- buscadores ----------
 
               private fun ddg(q: String): List<WebHit> {
                   val html = http("https://html.duckduckgo.com/html/", "POST", "q=" + enc(q) + "&kl=br-pt", UA, "text/html")
@@ -499,54 +532,62 @@ jobs:
               // ---------- montagem do contexto ----------
 
               private suspend fun generalCtx(raw: String, log: (String) -> Unit): WebCtx? {
-                  val q = cleanQuery(raw)
-                  val nq = leadRe.replace(norm(raw), "")
-                  val definitional = defRe.containsMatchIn(nq)
-                  val kw = keywordQuery(q)
-                  return coroutineScope {
-                      val webD = async(Dispatchers.IO) { runSrc("DuckDuckGo", log) { ddg(q) } }
-                      val webK = async(Dispatchers.IO) { if (kw != q) runSrc("DuckDuckGo 2", log) { ddg(kw) } else emptyList<WebHit>() }
-                      val wikiD = async(Dispatchers.IO) {
-                          if (definitional) runSrc("Wikipédia", log) { wiki(q) } else emptyList<WebHit>()
-                      }
-                      var hits = (webD.await() + webK.await()).distinctBy { it.url }
-                      if (hits.isEmpty()) hits = withContext(Dispatchers.IO) { runSrc("Bing", log) { bing(kw) } }
-                      var wk = wikiD.await()
-                      if (hits.isEmpty() && wk.isEmpty() && !definitional) {
-                          wk = withContext(Dispatchers.IO) { runSrc("Wikipédia", log) { wiki(q) } }
-                      }
-                      if (hits.isEmpty() && wk.isEmpty()) {
-                          wk = withContext(Dispatchers.IO) { runSrc("Wikipédia EN", log) { wiki(kw, "en") } }
-                      }
-                      if (hits.isEmpty() && wk.isEmpty()) {
-                          null
-                      } else {
-                          val sb = StringBuilder()
-                          val firstWiki = wk.take(1)
-                          sb.append(fmt(firstWiki, 0, 700))
-                          sb.append(fmt(hits.take(4), firstWiki.size, 320))
-                          val pageHits = hits.filter { pageOk(it.url) }.take(2)
-                          val pages = pageHits.map { h -> async(Dispatchers.IO) { try { pageText(h.url, q) } catch (t: Throwable) { "" } } }
-                          var pi = 0
-                          for (d in pages) {
-                              val tx = d.await()
-                              val h = pageHits[pi]
-                              pi++
-                              if (tx.isNotEmpty()) {
-                                  if (pi == 1) sb.append("Trechos lidos nas páginas:\n")
-                                  sb.append("- ").append(h.source).append(": ").append(tx).append("\n")
-                              }
+              // pesquisa SOMENTE o dado pedido, nunca a frase inteira
+              val q = searchQuery(raw)
+              log("Busca: " + q)
+              val nq = leadRe.replace(norm(raw), "")
+              val definitional = defRe.containsMatchIn(nq)
+              return coroutineScope {
+                  val webD = async(Dispatchers.IO) { runSrc("DuckDuckGo", log) { ddg(q) } }
+                  val wikiD = async(Dispatchers.IO) {
+                      if (definitional) runSrc("Wikipédia", log) { wiki(q) } else emptyList<WebHit>()
+                  }
+                  var hits = webD.await()
+                  if (hits.isEmpty()) hits = withContext(Dispatchers.IO) { runSrc("Bing", log) { bing(q) } }
+                  var wk = wikiD.await()
+                  if (hits.isEmpty() && wk.isEmpty() && !definitional) {
+                      wk = withContext(Dispatchers.IO) { runSrc("Wikipédia", log) { wiki(q) } }
+                  }
+                  if (hits.isEmpty() && wk.isEmpty()) {
+                      wk = withContext(Dispatchers.IO) { runSrc("Wikipédia EN", log) { wiki(q, "en") } }
+                  }
+                  if (hits.isEmpty() && wk.isEmpty()) {
+                      null
+                  } else {
+                      val urls = ArrayList<String>()
+                      val sb = StringBuilder()
+                      // SEMPRE entra no primeiro site da lista e lê a página inteira.
+                      // Só passa para o próximo se a página não abrir / vier vazia.
+                      var pageRead = false
+                      for (h in hits.filter { pageOk(it.url) }.take(3)) {
+                          val tx = try {
+                              withContext(Dispatchers.IO) { pageText(h.url, q, PAGE_CHARS) }
+                          } catch (t: CancellationException) {
+                              throw t
+                          } catch (t: Throwable) {
+                              log("Página falhou: " + h.url + " " + t.message)
+                              ""
                           }
-                          log("Páginas lidas: " + pages.size)
-                          val urls = ArrayList<String>()
-                                    for (h in firstWiki) if (h.url.isNotEmpty()) urls.add(h.url)
-                                    for (h in hits.take(4)) if (h.url.isNotEmpty()) urls.add(h.url)
-                                    WebCtx(sb.toString().take(MAX_CHARS), null, urls)
+                          if (tx.isNotEmpty()) {
+                              sb.append("PÁGINA LIDA POR COMPLETO (").append(h.source).append(" - ").append(h.title).append("):\n").append(tx).append("\n\n")
+                              urls.add(h.url)
+                              pageRead = true
+                              log("Página lida: " + h.url + " (" + tx.length + " caracteres)")
+                              break
+                          }
                       }
+                      // resumos dos resultados só como apoio (depois da página)
+                      sb.append("Outros resultados:\n")
+                      val firstWiki = wk.take(1)
+                      sb.append(fmt(firstWiki, 0, 500))
+                      sb.append(fmt(hits.take(3), firstWiki.size, 200))
+                      if (!pageRead) for (h in hits.take(3)) if (h.url.isNotEmpty()) urls.add(h.url)
+                      for (h in firstWiki) if (h.url.isNotEmpty()) urls.add(h.url)
+                      WebCtx(sb.toString().take(MAX_CHARS), null, urls)
                   }
               }
-
-              private suspend fun newsCtx(raw: String, log: (String) -> Unit): WebCtx? {
+          }
+          private suspend fun newsCtx(raw: String, log: (String) -> Unit): WebCtx? {
                   val topic = newsTopic(raw)
                   val hits = withContext(Dispatchers.IO) { runSrc("Google Notícias", log) { news(topic) } }
                   if (hits.isEmpty()) return null
@@ -2017,7 +2058,7 @@ jobs:
                           val c = JarvisWeb.cityFrom(text).ifEmpty { gs("city") }
                           "https://www.bing.com/search?q=" + enc("previsão do tempo " + c) + "&setlang=pt-BR&cc=BR"
                       }
-                      else -> "https://www.bing.com/search?q=" + enc(JarvisWeb.cleanQuery(text)) + "&setlang=pt-BR&cc=BR"
+                      else -> "https://www.bing.com/search?q=" + enc(JarvisWeb.searchQuery(text)) + "&setlang=pt-BR&cc=BR"
                   }
                   try {
                       w.loadUrl(url)
