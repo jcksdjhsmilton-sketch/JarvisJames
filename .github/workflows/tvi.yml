@@ -175,8 +175,8 @@ jobs:
           object JarvisWeb {
               private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
               private const val API_UA = "JarvisLocal/2.0 (assistente pessoal Android)"
-              private const val MAX_CHARS = 33000
-              private const val PAGE_CHARS = 30000
+              private const val MAX_CHARS = 12000
+              private const val PAGE_CHARS = 10000
 
               fun norm(s: String): String {
                   val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
@@ -193,7 +193,8 @@ jobs:
               private val timeRe = Regex("\\b(?:ultimas?|ultimos?|recentes?|esta semana|essa semana|este mes|esse mes|este ano|esse ano|20(?:2[3-9]|3[0-9])|dolar|euro|bitcoin|cotacao|ibovespa|selic|inflacao|placar|campeonato|quem ganhou|quanto custa|quanto esta|preco|lancamento|lancou|estreia|em cartaz|presidente|governador|prefeito)\\b")
               private val factRe = Regex("^(?:quem (?:e|foi|era|sao|ganhou|venceu|fez|descobriu|inventou|escreveu|dirigiu|canta|cantou|atua|estrela)|quando (?:foi|e|sera|nasceu|morreu|comeca|comecou|termina|estreia|lancou|acontece|aconteceu|sai|saiu)|onde (?:fica|ficam|foi|nasceu|e que fica)|qual (?:e )?(?:a |o )?(?:capital|populacao|distancia|altura|idade|data|horario|resultado|placar|moeda|area|fuso|preco|valor)|quant[oa]s? (?:anos|habitantes|pessoas|km|quilometros|metros|gols|titulos|paises|estados|custa|esta|vale|tempo falta)|capital d|que dia (?:e|foi|sera)|em que ano|significado de|quem e o dono)\\b")
               private val opinionRe = Regex("\\b(?:acha|opiniao|prefere|gosta|devo|deveria|melhor jeito|me ajuda|ajude|sugere|sugestao|recomenda)\\b")
-              private val defRe = Regex("^(?:quem (?:e|foi|era|sao)|o que (?:e|foi|sao|significa)|me (?:fale|conte) sobre|fale sobre|defina|explique|me explique|capital d|significado de|diferenca entre)\\b")
+              private val recRe = Regex("\\b(?:recomend\\w*|indic\\w*|sugir\\w*|sugest\\w*|melhor|melhores|vale a pena)\\b.*\\b(?:filmes?|series?|animes?|jogos?|games?|musicas?|albuns?|livros?|restaurantes?|bares?|lanchonetes?|pizzarias?|hamburguerias?|cafes?|celulares?|smartphones?|notebooks?|televisores?|fones?|produtos?|viagens?|passeios?|lugares?|canais?|documentarios?|streaming|netflix|youtube)\\b|\\bonde (?:assistir|comprar)\\b")
+          private val defRe = Regex("^(?:quem (?:e|foi|era|sao)|o que (?:e|foi|sao|significa)|me (?:fale|conte) sobre|fale sobre|defina|explique|me explique|capital d|significado de|diferenca entre)\\b")
 
               // n0 = texto normalizado (sem acento, minúsculo). nameN = nome do assistente normalizado.
               fun decide(n0: String, nameN: String): WebMode {
@@ -206,6 +207,7 @@ jobs:
                   if (newsRe.containsMatchIn(n)) return WebMode.NEWS
                   if (explicitRe.containsMatchIn(n)) return WebMode.GENERAL
                   if (noWebRe.containsMatchIn(n)) return WebMode.NONE
+                  if (recRe.containsMatchIn(n)) return WebMode.GENERAL
                   val q = leadRe.replace(n, "")
                   if (selfRe.containsMatchIn(q)) return WebMode.NONE
                   if (timeRe.containsMatchIn(q)) return WebMode.GENERAL
@@ -707,89 +709,6 @@ jobs:
           }
 
           object JarvisCloud {
-              // ---- DeepSeek (provedor principal) ----
-              const val DS_URL = "https://api.deepseek.com"
-              const val DS_MODEL = "deepseek-v4-flash"
-              // o workflow troca este marcador pela chave do secret DEEPSEEK_API_KEY (se existir)
-              private val DS_KEY_BUILD = "__DEEPSEEK_KEY__"
-              fun builtKey(): String = if (DS_KEY_BUILD.startsWith("__")) "" else DS_KEY_BUILD
-              // DeepSeek é usado quando: há chave embutida, a URL está vazia/é do DeepSeek, ou a chave começa com sk-
-              fun useDs(url: String, key: String): Boolean =
-                  builtKey().isNotEmpty() || url.isBlank() || url.contains("deepseek", true) || key.trim().startsWith("sk-")
-              fun dsKey(key: String): String = if (builtKey().isNotEmpty()) builtKey() else key.trim()
-
-              private fun streamDs(key: String, system: String, hist: List<Pair<Boolean, String>>, message: String, maxTokens: Int, onPiece: (String) -> Unit) {
-                  val body = JSONObject()
-                  body.put("model", DS_MODEL)
-                  val arr = org.json.JSONArray()
-                  arr.put(JSONObject().put("role", "system").put("content", system))
-                  for (h in hist) arr.put(JSONObject().put("role", if (h.first) "user" else "assistant").put("content", h.second))
-                  arr.put(JSONObject().put("role", "user").put("content", message))
-                  body.put("messages", arr)
-                  body.put("stream", true)
-                  body.put("max_tokens", maxTokens)
-                  body.put("temperature", 0.3)
-                  // sem "thinking": resposta direta, mais rápida e gasta bem menos tokens
-                  body.put("thinking", JSONObject().put("type", "disabled"))
-                  val c = URL(DS_URL + "/chat/completions").openConnection() as HttpURLConnection
-                  c.connectTimeout = 10000
-                  c.readTimeout = 90000
-                  c.requestMethod = "POST"
-                  c.setRequestProperty("Authorization", "Bearer " + key)
-                  c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-                  c.setRequestProperty("Accept", "text/event-stream")
-                  c.setRequestProperty("Accept-Encoding", "identity")
-                  c.setRequestProperty("User-Agent", "JarvisApp/2.0")
-                  try {
-                      c.doOutput = true
-                      c.outputStream.use { os -> os.write(body.toString().toByteArray(Charsets.UTF_8)) }
-                      val rc = c.responseCode
-                      if (rc != 200) {
-                          var err = ""
-                          try {
-                              err = c.errorStream?.bufferedReader(Charsets.UTF_8)?.use { r -> r.readText() }?.take(200) ?: ""
-                          } catch (t: Throwable) {
-                          }
-                          val why = when (rc) {
-                              401 -> "chave da API inválida"
-                              402 -> "sem saldo no DeepSeek"
-                              429 -> "muitas requisições, tente de novo"
-                              else -> "erro"
-                          }
-                          throw RuntimeException("DeepSeek HTTP " + rc + " (" + why + ") " + err)
-                      }
-                      var got = false
-                      var finished = false
-                      c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
-                          while (true) {
-                              val line = r.readLine() ?: break
-                              if (!line.startsWith("data:")) continue
-                              val payload = line.substring(5).trim()
-                              if (payload == "[DONE]") {
-                                  finished = true
-                                  break
-                              }
-                              val js = try { JSONObject(payload) } catch (t: Throwable) { continue }
-                              val ch = js.optJSONArray("choices")
-                              if (ch != null && ch.length() > 0) {
-                                  val c0 = ch.getJSONObject(0)
-                                  val d = c0.optJSONObject("delta")
-                                  if (d != null && !d.isNull("content")) {
-                                      val t = d.optString("content", "")
-                                      if (t.isNotEmpty()) {
-                                          got = true
-                                          onPiece(t)
-                                      }
-                                  }
-                                  if (!c0.isNull("finish_reason")) finished = true
-                              }
-                          }
-                      }
-                      if (!finished && !got) throw RuntimeException("DeepSeek: conexão encerrada sem resposta")
-                  } finally {
-                      c.disconnect()
-                  }
-              }
               private fun baseUrl(raw: String): String {
                   var b = raw.trim().trimEnd('/')
                   if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b
@@ -810,7 +729,6 @@ jobs:
               }
 
               fun health(base: String, key: String): Boolean {
-                  if (useDs(base, key)) return dsKey(key).isNotEmpty()
                   val c = open(base, "/health", key, "GET", 8000, 15000)
                   try {
                       if (c.responseCode != 200) return false
@@ -822,10 +740,6 @@ jobs:
               }
 
               fun stream(base: String, key: String, system: String, hist: List<Pair<Boolean, String>>, message: String, maxTokens: Int, onPiece: (String) -> Unit) {
-                  if (useDs(base, key)) {
-                      streamDs(dsKey(key), system, hist, message, maxTokens, onPiece)
-                      return
-                  }
                   val body = JSONObject()
                   body.put("system", system)
                   val arr = org.json.JSONArray()
@@ -1508,7 +1422,7 @@ jobs:
                       }
                   }
                   var body = ""
-                  if (method == "POST" && len > 0 && len <= 8192) {
+                  if (method == "POST" && len > 0 && len <= 32768) {
                       val buf = CharArray(len)
                       var got = 0
                       while (got < len) {
@@ -1724,7 +1638,7 @@ jobs:
                   ui.postDelayed(tick, 30000)
                   ui.post(weatherTick)
 
-                  if (!cloudConfigured()) {
+                  if (gs("url").isBlank() || gs("key").isBlank()) {
                       ui.postDelayed({ openSettings() }, 600)
                   } else {
                       connectCloud()
@@ -1845,9 +1759,6 @@ jobs:
               private fun gs(k: String, d: String = ""): String = prefs.getString(k, d) ?: d
 
               private fun gb(k: String, d: Boolean): Boolean = prefs.getBoolean(k, d)
-              private fun cloudConfigured(): Boolean =
-                  if (JarvisCloud.useDs(gs("url"), gs("key"))) JarvisCloud.dsKey(gs("key")).isNotEmpty()
-                  else gs("url").isNotBlank() && gs("key").isNotBlank()
 
               private fun u(v: Int): Int = Math.max(1, Math.round(v * unit))
 
@@ -2047,10 +1958,10 @@ jobs:
 
               private fun updateConn() {
                   if (cloudOk) {
-                      connTv.text = "● IA CONECTADA"
+                      connTv.text = "● SERVIDOR CONECTADO"
                       connTv.setTextColor(Pal.OK)
-                  } else if (!cloudConfigured()) {
-                      connTv.text = "● CHAVE DA IA NÃO CONFIGURADA"
+                  } else if (gs("url").isBlank()) {
+                      connTv.text = "● SERVIDOR NÃO CONFIGURADO"
                       connTv.setTextColor(Pal.WARN)
                   } else {
                       connTv.text = "● SERVIDOR FORA DO AR"
@@ -2210,7 +2121,7 @@ jobs:
               private fun connectCloud() {
                   val u = gs("url")
                   val k = gs("key")
-                  if (!cloudConfigured()) {
+                  if (u.isBlank() || k.isBlank()) {
                       cloudOk = false
                       setState(state)
                       return
@@ -2232,19 +2143,35 @@ jobs:
 
               private fun defaultPersona(): String =
                   "Você é Jarvis, um assistente pessoal de voz inspirado no Jarvis do Homem de Ferro, que fica na TV da sala. " +
-                  "Fale sempre em português do Brasil. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
+                  "Fale sempre em português do Brasil, nunca em chinês ou inglês, a menos que peçam. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
                   "Responda em no máximo 3 frases curtas. Não use markdown, listas, emojis nem símbolos, porque suas respostas serão faladas em voz alta. " +
                   "Se não souber algo, diga com honestidade."
 
-              private fun buildSystemPrompt(): String {
+              private fun defaultWebPrompt(): String =
+              "ACESSO À INTERNET: você TEM acesso à internet em tempo real. Quem pesquisa é o aplicativo da TV: quando o usuário pergunta algo atual ou factual, o app busca na web e coloca o resultado no começo da mensagem, em um bloco que começa com 'Resultados de pesquisa obtidos agora na internet', 'Manchetes recentes obtidas agora na internet' ou 'Dados de clima obtidos agora na internet'. Esse bloco é informação real e atual, não é fala do usuário. Mensagens que começam com '[Nota:' são avisos do aplicativo, também não são fala do usuário. " +
+              "COMO USAR: 1) Nunca diga que não tem acesso à internet nem que é apenas um modelo de linguagem. " +
+              "2) Quando houver bloco de pesquisa, responda com base nele; se ele contradisser o que você lembra, vale o bloco. " +
+              "3) Procure o dado exato pedido (data, número, nome, preço, horário) e responda direto, sem enrolar. " +
+              "4) Se o dado não aparecer, diga que pesquisou e não encontrou, e nunca invente datas, números, nomes ou fatos. " +
+              "5) Sem bloco de pesquisa, se a pergunta for sobre algo que muda com o tempo (preços, placares, notícias, lançamentos, cargos), avise que pode estar desatualizado e sugira pedir para você pesquisar. " +
+              "6) Cite a fonte só se ajudar e em poucas palavras (por exemplo: segundo o G1), e jamais leia endereços ou links. " +
+              "7) Escreva números, datas e horários de um jeito fácil de ouvir. " +
+              "RECOMENDAÇÕES: quando pedirem indicação (filme, série, jogo, música, restaurante, produto, passeio), dê de 1 a 3 opções concretas, a melhor primeiro, cada uma com um motivo curto, priorizando o que a pesquisa trouxer e o gosto que o usuário já mencionou. Se faltar um detalhe essencial (orçamento, gênero, cidade), faça no máximo uma pergunta curta. Não invente nomes de lugares, preços ou notas: o que não estiver na pesquisa, apresente como sugestão geral e diga que vale confirmar. Mesmo nas recomendações, use no máximo 4 frases curtas, sem listas."
+
+          private fun noWebPrompt(): String =
+              "ACESSO À INTERNET: a pesquisa na internet está desligada nos ajustes neste momento. Responda com o que você sabe e avise quando algo puder estar desatualizado."
+
+          private fun buildSystemPrompt(): String {
                   val city = gs("city")
                   val custom = gs("prompt").trim()
-                  val persona = if (custom.isNotEmpty()) custom.take(1200) else defaultPersona()
+                  val persona = if (custom.isNotEmpty()) custom.take(2000) else defaultPersona()
+                  val webCustom = gs("webprompt").trim()
+                  val webPart = if (!gb("web", true)) noWebPrompt() else if (webCustom.isNotEmpty()) webCustom.take(2500) else defaultWebPrompt()
                   return persona +
                       (if (notes().isEmpty()) "" else "\nFatos que o usuário pediu para você lembrar: " + notes().joinToString("; ") + ".") +
                       "\nData e hora atuais: " + nowStr() + "." +
                       (if (city.isBlank()) "" else "\nCidade do usuário: " + city + ".") +
-                      " Você tem acesso à internet: quando a mensagem do usuário trouxer resultados de pesquisa, baseie-se neles e não invente fatos. Se não tiver certeza, diga o que sabe e avise que pode estar desatualizado, em vez de apenas dizer que não sabe."
+                      "\n" + webPart
               }
 
               private fun loadHist() {
@@ -2689,7 +2616,7 @@ jobs:
                           if (finalText.isBlank()) {
                               if (fl != null) {
                                   cloudOk = false
-                                  reply(if (JarvisCloud.useDs(url, key)) "Não consegui falar com o DeepSeek. Verifique a internet, a chave da API e o saldo." else "Não consegui falar com o servidor. Verifique se o notebook do Kaggle está rodando.")
+                                  reply("Não consegui falar com o servidor. Verifique se o notebook do Kaggle está rodando.")
                               } else {
                                   reply("Desculpe, não consegui formular uma resposta.")
                               }
@@ -2844,8 +2771,8 @@ jobs:
                   else "Conecte a TV ao Wi-Fi para preencher pelo celular."
                   col.addView(info, LinearLayout.LayoutParams(MATCH, WRAP))
 
-                  val urlEt = inputField("URL (vazio = DeepSeek)", gs("url"), false)
-                  val keyEt = inputField("API_KEY (sk-... do DeepSeek)", gs("key"), true)
+                  val urlEt = inputField("URL do servidor (https://xxxx.ngrok-free.dev)", gs("url"), false)
+                  val keyEt = inputField("API_KEY", gs("key"), true)
                   val cityEt = inputField("Cidade (para o tempo)", gs("city"), false)
                   val promptEt = EditText(this)
                   promptEt.hint = "Prompt do Jarvis (vazio = padrão)"
@@ -2853,6 +2780,12 @@ jobs:
                   promptEt.minLines = 3
                   promptEt.maxLines = 6
                   promptEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                  val webEt = EditText(this)
+                  webEt.hint = "Prompt de internet e recomendações (vazio = padrão)"
+                  webEt.setText(gs("webprompt"))
+                  webEt.minLines = 3
+                  webEt.maxLines = 6
+                  webEt.inputType = promptEt.inputType
                   val contSw = Switch(this)
                   contSw.text = "Escuta contínua (reabre o microfone após cada resposta)"
                   contSw.isChecked = gb("cont", false)
@@ -2863,6 +2796,7 @@ jobs:
                   col.addView(keyEt, vLp(6))
                   col.addView(cityEt, vLp(6))
                   col.addView(promptEt, vLp(6))
+                  col.addView(webEt, vLp(6))
                   col.addView(contSw, vLp(14))
                   col.addView(webSw, vLp(8))
 
@@ -2878,13 +2812,14 @@ jobs:
                           "<label>API_KEY (deixe vazio para manter a atual)</label><input name=\"key\" type=\"password\" autocomplete=\"off\">" +
                           "<label>Cidade</label><input name=\"city\" value=\"" + htmlEsc(gs("city")) + "\">" +
                           "<label>Prompt do Jarvis (vazio = padrão)</label><textarea name=\"prompt\" rows=\"6\" style=\"width:100%;box-sizing:border-box;padding:12px;margin:6px 0 16px;font-size:16px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff\">" + htmlEsc(gs("prompt")) + "</textarea>" +
+                          "<label>Prompt de internet e recomendações (vazio = padrão)</label><textarea name=\"webprompt\" rows=\"6\" style=\"width:100%;box-sizing:border-box;padding:12px;margin:6px 0 16px;font-size:16px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff\">" + htmlEsc(gs("prompt")) + "</textarea>" +
                           "<label>PIN mostrado na TV</label><input name=\"pin\" inputmode=\"numeric\" autocomplete=\"off\">" +
                           "<button type=\"submit\">Enviar para a TV</button></form></body></html>"
                   }, { m ->
                       val url = (m["url"] ?: "").trim()
                       val key = (m["key"] ?: "").trim()
                       val city = (m["city"] ?: "").trim()
-                      if (url.isEmpty() && key.isEmpty() && city.isEmpty()) {
+                      if (url.isEmpty()) {
                           false
                       } else {
                           runOnUiThread {
@@ -2892,6 +2827,7 @@ jobs:
                               if (key.isNotEmpty()) keyEt.setText(key)
                               cityEt.setText(city)
                               promptEt.setText((m["prompt"] ?: "").trim())
+                              webEt.setText((m["webprompt"] ?: "").trim())
                               toast("Dados recebidos do celular. Confirme em Salvar e conectar.")
                           }
                           true
@@ -2908,6 +2844,7 @@ jobs:
                               .putString("key", keyEt.text.toString().trim())
                               .putString("city", cityEt.text.toString().trim())
                               .putString("prompt", promptEt.text.toString().trim())
+                              .putString("webprompt", webEt.text.toString().trim())
                               .putBoolean("cont", contSw.isChecked)
                               .putBoolean("web", webSw.isChecked)
                               .apply()
@@ -2937,17 +2874,6 @@ jobs:
 
           echo "Arquivos criados:"
           find tv -type f | sort
-
-      - name: Injetar chave do DeepSeek (secret)
-        env:
-          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-        run: |
-          if [ -n "$DEEPSEEK_KEY" ]; then
-            grep -rl "__DEEPSEEK_KEY__" tv/app/src | xargs sed -i "s|__DEEPSEEK_KEY__|$DEEPSEEK_KEY|g"
-            echo "Chave do DeepSeek embutida a partir do secret."
-          else
-            echo "::warning::Secret DEEPSEEK_API_KEY não definido. Digite a chave nos Ajustes do app."
-          fi
 
       - name: Instalar JDK 17
         uses: actions/setup-java@v4
