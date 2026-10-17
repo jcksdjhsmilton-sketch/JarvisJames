@@ -1605,6 +1605,8 @@ jobs:
                           send(c, 200, "application/json", "{\"ok\":true,\"busy\":" + busy + "}")
                       } else if (parts[0] == "GET") {
                           send(c, 200, "text/html; charset=utf-8", PAGE)
+                      } else if (parts[0] == "OPTIONS") {
+                          send(c, 204, "text/plain", "")
                       } else {
                           send(c, 405, "text/plain", "x")
                       }
@@ -1634,7 +1636,7 @@ jobs:
                   val bytes = text.toByteArray(Charsets.UTF_8)
                   val status = if (code == 200) "OK" else if (code == 403) "Forbidden" else if (code == 429) "Too Many Requests" else "Error"
                   val head = "HTTP/1.1 " + code + " " + status + "\r\nContent-Type: " + type + "\r\nContent-Length: " + bytes.size +
-                      "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+                      "\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Private-Network: true\r\nConnection: close\r\n\r\n"
                   val os = c.getOutputStream()
                   os.write(head.toByteArray(Charsets.ISO_8859_1))
                   os.write(bytes)
