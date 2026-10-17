@@ -1,0 +1,2929 @@
+name: Build Jarvis TV APK
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/tv.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Criar o projeto Android inteiro
+        run: |
+          set -e
+          mkdir -p tv/app/src/main/kotlin/br/local/jarvis/tv tv/app/src/main/res/drawable
+
+          cat > tv/settings.gradle.kts <<'JVEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "JarvisTV"
+          include(":app")
+          JVEOF
+
+          cat > tv/build.gradle.kts <<'JVEOF'
+          plugins {
+              id("com.android.application") version "8.11.1" apply false
+              id("org.jetbrains.kotlin.android") version "2.2.20" apply false
+          }
+          JVEOF
+
+          cat > tv/gradle.properties <<'JVEOF'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          JVEOF
+
+          cat > tv/app/build.gradle.kts <<'JVEOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "br.local.jarvis.tv"
+              compileSdk = 36
+              defaultConfig {
+                  applicationId = "br.local.jarvis.tv"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+
+          dependencies {
+              implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+          }
+          JVEOF
+
+          cat > tv/app/src/main/AndroidManifest.xml <<'JVEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.software.leanback" android:required="false"/>
+              <uses-feature android:name="android.hardware.touchscreen" android:required="false"/>
+              <uses-feature android:name="android.hardware.microphone" android:required="false"/>
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService"/>
+                  </intent>
+                  <intent>
+                      <action android:name="android.intent.action.TTS_SERVICE"/>
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.action.RECOGNIZE_SPEECH"/>
+                  </intent>
+              </queries>
+              <application
+                  android:label="Jarvis TV"
+                  android:icon="@drawable/ic_launcher"
+                  android:banner="@drawable/banner"
+                  android:allowBackup="false"
+                  android:usesCleartextTraffic="true"
+                  android:hardwareAccelerated="true"
+                  android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:screenOrientation="landscape"
+                      android:launchMode="singleTask"
+                      android:configChanges="orientation|screenSize|keyboardHidden|keyboard|navigation|screenLayout|smallestScreenSize|uiMode|density|locale|layoutDirection">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          JVEOF
+
+          cat > tv/app/src/main/res/drawable/banner.xml <<'JVEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="320dp"
+              android:height="180dp"
+              android:viewportWidth="320"
+              android:viewportHeight="180">
+              <path android:fillColor="#FF05070D" android:pathData="M0,0h320v180h-320z"/>
+              <path android:fillColor="#FF0E1A33" android:pathData="M160,90 m-62,0 a62,62 0 1,1 124,0 a62,62 0 1,1 -124,0"/>
+              <path android:fillColor="#FFFFFFFF" android:pathData="M160,90 m-34,0 a34,34 0 1,1 68,0 a34,34 0 1,1 -68,0"/>
+          </vector>
+          JVEOF
+
+          cat > tv/app/src/main/res/drawable/ic_launcher.xml <<'JVEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path android:fillColor="#FF05070D" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#FF0E1A33" android:pathData="M54,54 m-40,0 a40,40 0 1,1 80,0 a40,40 0 1,1 -80,0"/>
+              <path android:fillColor="#FFFFFFFF" android:pathData="M54,54 m-22,0 a22,22 0 1,1 44,0 a22,22 0 1,1 -44,0"/>
+          </vector>
+          JVEOF
+
+          cat > tv/app/src/main/kotlin/br/local/jarvis/tv/Net.kt <<'JVEOF'
+          package br.local.jarvis.tv
+
+          import android.text.Html
+          import kotlinx.coroutines.*
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.net.URLDecoder
+          import java.net.URLEncoder
+          import java.text.Normalizer
+          import java.util.Locale
+
+          enum class WebMode { NONE, GENERAL, NEWS, WEATHER }
+
+          class WebHit(val title: String, val snippet: String, val source: String, val url: String = "")
+
+          class WebCtx(val text: String, val city: String?, val urls: List<String> = emptyList())
+
+          const val NOT_FOUND_NOTE = "[Nota: pesquisei na internet agora e não encontrei a informação pedida. Não invente datas, números, nomes ou fatos específicos. Diga com clareza que não encontrou e sugira reformular a pergunta.] "
+          const val NO_WEB_NOTE = "[Nota: sem acesso à internet neste momento. Responda com o que você sabe e avise se algo puder estar desatualizado.] "
+
+          // Pesquisa na internet 100% gratuita e sem chave de API:
+          // DuckDuckGo (HTML) -> Bing (HTML) -> Wikipédia, Google Notícias (RSS) e Open-Meteo (clima).
+          object JarvisWeb {
+              private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+              private const val API_UA = "JarvisLocal/2.0 (assistente pessoal Android)"
+              private const val MAX_CHARS = 12000
+              private const val PAGE_CHARS = 10000
+
+              fun norm(s: String): String {
+                  val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
+                  return d.replace(Regex("\\p{M}+"), "").replace(Regex("[^a-z0-9: ]"), " ").replace(Regex("\\s+"), " ").trim()
+              }
+
+              private val chitRe = Regex("^(?:(?:oi|ola|opa|e ai|bom dia|boa tarde|boa noite|tudo bem|tudo bom|obrigado|obrigada|valeu|tchau|ate logo|como voce esta|como vai|como voce vai|quem e voce|qual e o seu nome|qual o seu nome|qual seu nome|o que voce faz|o que voce pode fazer|voce esta ai|me ajuda|ajuda)\\s*)+\$")
+              private val weatherRe = Regex("\\b(?:clima|previsao do tempo|vai chover|esta chovendo|ta chovendo|quantos graus|temperatura (?:hoje|agora|amanha|atual|la fora|aqui|em)|faz (?:calor|frio)|esta (?:frio|calor)|o tempo (?:hoje|amanha|agora|em|na|no|la fora|aqui|vai)|como (?:esta|ta|vai estar|vai ficar) o tempo)\\b|qual (?:e )?a temperatura(?: agora| hoje| la fora| aqui| atual)?\$")
+              private val newsRe = Regex("\\b(?:noticias?|manchetes?|o que esta acontecendo)\\b")
+              private val explicitRe = Regex("\\b(?:pesquis\\w*|procur\\w*|busqu\\w*|buscar|google|na internet|na web)\\b")
+              private val noWebRe = Regex("\\b(?:traduz\\w*|escreva|escrever|crie|criar|invente|resum\\w*|reescrev\\w*|corrij\\w*|conte (?:uma|um)|piada|poema|poesia|calcul\\w*|finja|imagine|quanto e \\d|\\d+ (?:mais|menos|vezes|dividido))\\b")
+              private val leadRe = Regex("^(?:voce )?(?:sabe|conhece|poderia|pode|consegue)(?: me)?(?: dizer| falar| informar)? ")
+              private val selfRe = Regex("\\b(?:voce|seu|sua|seus|suas|te)\\b")
+              private val timeRe = Regex("\\b(?:ultimas?|ultimos?|recentes?|esta semana|essa semana|este mes|esse mes|este ano|esse ano|20(?:2[3-9]|3[0-9])|dolar|euro|bitcoin|cotacao|ibovespa|selic|inflacao|placar|campeonato|quem ganhou|quanto custa|quanto esta|preco|lancamento|lancou|estreia|em cartaz|presidente|governador|prefeito)\\b")
+              private val factRe = Regex("^(?:quem (?:e|foi|era|sao|ganhou|venceu|fez|descobriu|inventou|escreveu|dirigiu|canta|cantou|atua|estrela)|quando (?:foi|e|sera|nasceu|morreu|comeca|comecou|termina|estreia|lancou|acontece|aconteceu|sai|saiu)|onde (?:fica|ficam|foi|nasceu|e que fica)|qual (?:e )?(?:a |o )?(?:capital|populacao|distancia|altura|idade|data|horario|resultado|placar|moeda|area|fuso|preco|valor)|quant[oa]s? (?:anos|habitantes|pessoas|km|quilometros|metros|gols|titulos|paises|estados|custa|esta|vale|tempo falta)|capital d|que dia (?:e|foi|sera)|em que ano|significado de|quem e o dono)\\b")
+              private val opinionRe = Regex("\\b(?:acha|opiniao|prefere|gosta|devo|deveria|melhor jeito|me ajuda|ajude|sugere|sugestao|recomenda)\\b")
+              private val recRe = Regex("\\b(?:recomend\\w*|indic\\w*|sugir\\w*|sugest\\w*|melhor|melhores|vale a pena)\\b.*\\b(?:filmes?|series?|animes?|jogos?|games?|musicas?|albuns?|livros?|restaurantes?|bares?|lanchonetes?|pizzarias?|hamburguerias?|cafes?|celulares?|smartphones?|notebooks?|televisores?|fones?|produtos?|viagens?|passeios?|lugares?|canais?|documentarios?|streaming|netflix|youtube)\\b|\\bonde (?:assistir|comprar)\\b")
+          private val defRe = Regex("^(?:quem (?:e|foi|era|sao)|o que (?:e|foi|sao|significa)|me (?:fale|conte) sobre|fale sobre|defina|explique|me explique|capital d|significado de|diferenca entre)\\b")
+
+              // n0 = texto normalizado (sem acento, minúsculo). nameN = nome do assistente normalizado.
+              fun decide(n0: String, nameN: String): WebMode {
+                  var n = n0
+                  if (nameN.length >= 2) n = n.replace(Regex("\\b" + Regex.escape(nameN) + "\\b"), " ")
+                  n = n.replace(Regex("\\s+"), " ").trim()
+                  if (n.length < 4) return WebMode.NONE
+                  if (chitRe.matches(n)) return WebMode.NONE
+                  if (weatherRe.containsMatchIn(n)) return WebMode.WEATHER
+                  if (newsRe.containsMatchIn(n)) return WebMode.NEWS
+                  if (explicitRe.containsMatchIn(n)) return WebMode.GENERAL
+                  if (noWebRe.containsMatchIn(n)) return WebMode.NONE
+                  if (recRe.containsMatchIn(n)) return WebMode.GENERAL
+                  val q = leadRe.replace(n, "")
+                  if (selfRe.containsMatchIn(q)) return WebMode.NONE
+                  if (timeRe.containsMatchIn(q)) return WebMode.GENERAL
+                  if (q.split(" ").size >= 3 && factRe.containsMatchIn(q) && !opinionRe.containsMatchIn(q)) return WebMode.GENERAL
+                  return WebMode.NONE
+              }
+
+              fun cleanQuery(raw: String): String {
+                  var q = raw.trim()
+                  q = q.replace(Regex("(?i)\\b(?:j[aá]rvis|jarvi|garvis|jarves|jarvys|charvis|e a[ií]|ei|hey|ok)\\b[,.:!]?"), " ")
+                  q = q.replace(Regex("(?i)\\b(?:pesquise|pesquisar|pesquisa|procure|procurar|busque|buscar)\\b(?: na internet| no google| na web| online)?(?: por| sobre| a respeito de)?"), " ")
+                  q = q.replace(Regex("(?i)\\b(?:na internet|no google|na web)\\b"), " ")
+                  q = q.replace(Regex("(?i)^\\s*(?:por favor|voc[eê] (?:sabe|pode|poderia)(?: me)?(?: dizer)?)\\b,?"), " ")
+                  q = q.replace(Regex("[?!]+"), " ").replace(Regex("\\s+"), " ").trim().trim(',', '.', ' ')
+                  return if (q.length < 3) raw.trim() else q
+              }
+
+              fun newsTopic(raw: String): String {
+                  var q = cleanQuery(raw)
+                  q = q.replace(Regex("(?i)^(?:quais (?:s[aã]o )?)?(?:me (?:diga|fale|conte) )?(?:as |os )?(?:(?:[uú]ltimas|principais|[uú]ltimos) )?(?:not[ií]cias?|manchetes?)(?: (?:de hoje|do dia|de agora|mais recentes))?(?: (?:sobre|do|da|de|no|na|em))?\\s*"), "")
+                  q = q.replace(Regex("(?i)^o que (?:est[aá] acontecendo|aconteceu)(?: (?:no|na|em|com|de|do|da))?\\s*"), "")
+                  q = q.replace(Regex("(?i)\\b(?:hoje|agora)\\b"), " ").replace(Regex("\\s+"), " ").trim()
+                  return q
+              }
+
+              fun cityFrom(raw: String): String {
+                  val m = Regex("(?i)\\b(?:em|na|no|para|pra)\\s+([\\p{L}][\\p{L}' .-]{1,40})").find(raw) ?: return ""
+                  var c = m.groupValues[1]
+                  c = c.replace(Regex("(?i)\\s+(?:hoje|amanh[aã]|agora|neste momento|nesse momento|esta semana|essa semana|este fim de semana|esse fim de semana|fim de semana|depois de amanh[aã]|de noite|de manh[aã]|pela manh[aã]|esta noite|[aà] noite|[aà] tarde)\\b.*\$"), "")
+                  c = c.replace(Regex("[?!.,]+\$"), "").trim()
+                  val n = norm(c)
+                  if (n.length < 3) return ""
+                  if (Regex("^(?:minha|meu|nossa|nosso|aqui|casa|cidade|regiao|bairro|segunda|terca|quarta|quinta|sexta|sabado|domingo|semana|dia|noite|manha|tarde|hoje|amanha|agora|momento|geral|brasil)\\b").containsMatchIn(n)) return ""
+                  return c
+              }
+
+              fun wrap(ctx: WebCtx, question: String, mode: WebMode, now: String): String {
+                  val head = when (mode) {
+                      WebMode.WEATHER -> "Dados de clima obtidos agora na internet"
+                      WebMode.NEWS -> "Manchetes recentes obtidas agora na internet"
+                      else -> "Resultados de pesquisa obtidos agora na internet"
+                  }
+                  val rule = when (mode) {
+                      WebMode.WEATHER -> "Responda de forma natural, citando a temperatura atual, a mínima, a máxima e a chance de chuva, em até 3 frases curtas."
+                      WebMode.NEWS -> "Resuma as principais manchetes em até 3 frases curtas."
+                      else -> "O texto acima é o conteúdo completo da página que foi aberta. Leia tudo, procure nele o dado exato que o usuário pediu (data, número, nome, valor) e responda direto, em 1 a 3 frases. Se o dado realmente não aparecer em nenhum trecho, diga que não encontrou na página e não invente valores."
+                  }
+                  return head + " (" + now + "):\n" + ctx.text + "\n" + rule +
+                      " Fale em português do Brasil, sem listas, sem markdown e sem links.\nPergunta do usuário: " + question
+              }
+
+              suspend fun fetch(mode: WebMode, raw: String, savedCity: String, log: (String) -> Unit): WebCtx? {
+                  return withTimeout(if (mode == WebMode.GENERAL) 34000L else 16000L) {
+                      when (mode) {
+                          WebMode.WEATHER -> weatherCtx(raw, savedCity, log)
+                          WebMode.NEWS -> newsCtx(raw, log)
+                          WebMode.GENERAL -> generalCtx(raw, log)
+                          WebMode.NONE -> null
+                      }
+                  }
+              }
+
+              // palavras-chave: tira "qual", "de", "do", etc. para a busca ficar com o assunto
+              private const val STOP = "qual|quais|quando|quem|onde|quanto|quantos|quantas|que|o|a|os|as|do|da|dos|das|de|e|um|uma|foi|sao|era|ser|em|no|na|sobre|por|como|pra|para|voce|sabe|me|diga|fale|dia|data|hora|esta|e"
+
+              fun keywordQuery(q: String): String {
+                  val k = norm(q).replace(Regex("\\b(?:" + STOP + ")\\b"), " ").replace(Regex("\\s+"), " ").trim()
+                  return if (k.length < 3) q else k
+              }
+
+          // Extrai SÓ o assunto/dado pedido (nunca a frase inteira do usuário).
+          // "me fala qual é a data de nascimento do YouTuber jazzghost" -> "data nascimento youtuber jazzghost"
+          private val LEAD = setOf("por","favor","me","pode","poderia","consegue","voce","sabe","quero","queria","gostaria","saber","diga","dizer","fala","falar","fale","conta","conte","informa","informar","mostra","mostrar","descubra","veja","ve","eu","qual","quais","quem","quando","onde","quanto","quantos","quantas","como","que","o","a","os","as","e","eh","foi","era","sao","ser","um","uma","tipo","pra","para","ai","ei","ola","oi","de","do","da")
+          private val CONN = setOf("de","do","da","dos","das","no","na","nos","nas","em","o","a","os","as","um","uma","e","eh","que","pra","para","me","voce","por")
+
+          fun searchQuery(raw: String): String {
+              val base = norm(cleanQuery(raw))
+              val t = base.split(" ").filter { it.isNotEmpty() }.toMutableList()
+              while (t.isNotEmpty() && t[0] in LEAD) t.removeAt(0)
+              val core = t.filter { it !in CONN }.joinToString(" ").trim()
+              if (core.length >= 3) return core
+              val kw = keywordQuery(base)
+              return if (kw.length >= 3) kw else base
+          }
+              // ---------- rede ----------
+
+              private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+
+              private fun http(url: String, method: String = "GET", body: String? = null, ua: String = UA, accept: String = "*/*", fast: Boolean = false): String {
+                  val t0 = System.currentTimeMillis()
+                  var u = url
+                  var m = method
+                  var b = body
+                  for (hop in 0..5) {
+                      val c = URL(u).openConnection() as HttpURLConnection
+                      try {
+                          c.instanceFollowRedirects = false
+                          c.connectTimeout = if (fast) 4000 else 7000
+                          c.readTimeout = if (fast) 5000 else 9000
+                          c.requestMethod = m
+                          c.setRequestProperty("User-Agent", ua)
+                          c.setRequestProperty("Accept", accept)
+                          c.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.5")
+                          val payload = b
+                          if (payload != null) {
+                              c.doOutput = true
+                              c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                              val bytes = payload.toByteArray(Charsets.UTF_8)
+                              c.outputStream.use { os -> os.write(bytes) }
+                          }
+                          val rc = c.responseCode
+                          if (rc in 300..399) {
+                              val loc = c.getHeaderField("Location") ?: throw RuntimeException("redirecionamento sem destino")
+                              u = URL(URL(u), loc).toString()
+                              m = "GET"
+                              b = null
+                              continue
+                          }
+                          if (rc != 200) throw RuntimeException("HTTP " + rc)
+                          val sb = StringBuilder()
+                          val buf = CharArray(8192)
+                          c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                              while (sb.length < (if (fast) 250000 else 600000) && (!fast || System.currentTimeMillis() - t0 < 6000)) {
+                                  val k = r.read(buf)
+                                  if (k < 0) break
+                                  sb.append(buf, 0, k)
+                              }
+                          }
+                          return sb.toString()
+                      } finally {
+                          c.disconnect()
+                      }
+                  }
+                  throw RuntimeException("redirecionamentos demais")
+              }
+
+              private fun clean(s: String): String {
+                  val noTags = s.replace(Regex("(?is)<script.*?</script>|<style.*?</style>"), " ").replace(Regex("<[^>]*>"), " ")
+                  return Html.fromHtml(noTags, Html.FROM_HTML_MODE_LEGACY).toString()
+                      .replace("\uFFFC", "").replace('\u00A0', ' ').replace(Regex("\\s+"), " ").trim()
+              }
+
+              private fun runSrc(name: String, log: (String) -> Unit, f: () -> List<WebHit>): List<WebHit> {
+                  return try {
+                      val r = f()
+                      log("Pesquisa " + name + ": " + r.size + " resultado(s)")
+                      r
+                  } catch (t: Throwable) {
+                      log("Pesquisa " + name + " falhou: " + t.javaClass.simpleName + ": " + t.message)
+                      emptyList()
+                  }
+              }
+
+              private fun fmt(hits: List<WebHit>, startIdx: Int, snipMax: Int): String {
+                  val sb = StringBuilder()
+                  var i = startIdx
+                  for (h in hits) {
+                      i++
+                      sb.append(i).append(". ").append(h.title)
+                      if (h.snippet.isNotEmpty()) sb.append(": ").append(h.snippet.take(snipMax))
+                      if (h.source.isNotEmpty()) sb.append(" (").append(h.source).append(")")
+                      sb.append("\n")
+                  }
+                  return sb.toString()
+              }
+
+              private val skipHosts = listOf("google.", "bing.")
+
+          private fun pageOk(url: String): Boolean {
+              if (!url.startsWith("http")) return false
+              val u = url.lowercase()
+              if (u.contains(".pdf") || u.contains(".mp4") || u.contains(".jpg") || u.contains(".png")) return false
+              for (h in skipHosts) if (u.contains(h)) return false
+              return true
+          }
+
+          // Lê a página INTEIRA (nada de nav/aside/footer descartado, sem filtro de frases).
+          // Se o texto couber no orçamento, vai tudo. Se for maior que o contexto do modelo,
+          // mantém os trechos que mais batem com o dado pedido, na ordem original da página.
+          private fun pageText(url: String, q: String, budget: Int): String {
+              val html = http(url, "GET", null, UA, "text/html,application/xhtml+xml", false)
+              val bi = html.indexOf("<body")
+              var body = if (bi > 0) html.substring(bi) else html
+              body = body.replace(Regex("(?is)<(script|style|noscript|svg|template|iframe)\\b[^>]*>.*?</\\1>"), " ")
+              val text = clean(body)
+              if (text.length < 80) return ""
+              if (text.length <= budget) return text
+              val kw = norm(q).split(" ").filter { it.length >= 3 }.toSet()
+              val parts = ArrayList<String>()
+              for (s in text.split(Regex("(?<=[.!?])\\s+"))) {
+                  if (s.length > 600) { for (c in s.chunked(500)) parts.add(c) } else parts.add(s)
+              }
+              val chunks = ArrayList<String>()
+              val cur = StringBuilder()
+              for (s in parts) {
+                  if (cur.length + s.length > 500 && cur.isNotEmpty()) { chunks.add(cur.toString().trim()); cur.setLength(0) }
+                  cur.append(s).append(' ')
+              }
+              if (cur.isNotEmpty()) chunks.add(cur.toString().trim())
+              val scored = ArrayList<Pair<Int, Int>>()
+              for (i in chunks.indices) {
+                  val ns = norm(chunks[i])
+                  var sc = 0
+                  for (k in kw) if (ns.contains(k)) sc++
+                  scored.add(Pair(sc, i))
+              }
+              val chosen = java.util.TreeSet<Int>()
+              var used = 0
+              if (chunks.isNotEmpty()) { chosen.add(0); used += chunks[0].length + 1 }
+              for (pr in scored.sortedWith(compareByDescending<Pair<Int, Int>> { it.first }.thenBy { it.second })) {
+                  if (chosen.contains(pr.second)) continue
+                  val len = chunks[pr.second].length + 1
+                  if (used + len > budget) continue
+                  chosen.add(pr.second)
+                  used += len
+              }
+              val sb = StringBuilder()
+              for (i in chosen) sb.append(chunks[i]).append(' ')
+              return sb.toString().trim()
+          }
+          // ---------- buscadores ----------
+
+              private fun ddg(q: String): List<WebHit> {
+                  val html = http("https://html.duckduckgo.com/html/", "POST", "q=" + enc(q) + "&kl=br-pt", UA, "text/html")
+                  val reA = Regex("(<a\\b[^>]*class=\"[^\"]*result__a[^\"]*\"[^>]*>)(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                  val reS = Regex("<a\\b[^>]*class=\"[^\"]*result__snippet[^\"]*\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                  val reH = Regex("href=\"([^\"]*)\"")
+                  val ms = reA.findAll(html).toList()
+                  val out = ArrayList<WebHit>()
+                  for (i in ms.indices) {
+                      val m = ms[i]
+                      var href = (reH.find(m.groupValues[1])?.groupValues?.get(1) ?: "").replace("&amp;", "&")
+                      if (href.contains("duckduckgo.com/y.js") || href.contains("ad_provider") || href.contains("ad_domain")) continue
+                      val uddg = Regex("uddg=([^&]+)").find(href)
+                      if (uddg != null) {
+                          href = try {
+                              URLDecoder.decode(uddg.groupValues[1], "UTF-8")
+                          } catch (t: Throwable) {
+                              href
+                          }
+                      }
+                      if (href.startsWith("//")) href = "https:" + href
+                      val endPos = if (i + 1 < ms.size) ms[i + 1].range.first else html.length
+                      val startPos = m.range.last + 1
+                      val region = if (startPos < endPos) html.substring(startPos, endPos) else ""
+                      val sn = reS.find(region)?.let { clean(it.groupValues[1]) } ?: ""
+                      val title = clean(m.groupValues[2])
+                      if (title.isEmpty()) continue
+                      val host = try {
+                          URL(href).host.removePrefix("www.")
+                      } catch (t: Throwable) {
+                          ""
+                      }
+                      out.add(WebHit(title, sn, host, href))
+                      if (out.size >= 6) break
+                  }
+                  return out
+              }
+
+              private fun bing(q: String): List<WebHit> {
+                  val html = http("https://www.bing.com/search?q=" + enc(q) + "&setlang=pt-BR&cc=BR", "GET", null, UA, "text/html")
+                  val reT = Regex("<h2[^>]*>\\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", RegexOption.DOT_MATCHES_ALL)
+                  val reP = Regex("<p[^>]*>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
+                  val out = ArrayList<WebHit>()
+                  val blocks = html.split("<li class=\"b_algo\"")
+                  for (i in 1 until blocks.size) {
+                      val b = blocks[i].substringBefore("</li>")
+                      val t = reT.find(b)
+                      val p = reP.find(b)
+                      val title = if (t != null) clean(t.groupValues[2]) else ""
+                      val sn = if (p != null) clean(p.groupValues[1]) else ""
+                      if (title.isNotEmpty() && sn.isNotEmpty()) out.add(WebHit(title, sn, "Bing", if (t != null) t.groupValues[1].replace("&amp;", "&") else ""))
+                      if (out.size >= 6) break
+                  }
+                  return out
+              }
+
+              private fun wiki(q: String, lang: String = "pt"): List<WebHit> {
+                  val url = "https://" + lang + ".wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrlimit=3&gsrsearch=" + enc(q) +
+                      "&prop=extracts&exintro=1&explaintext=1&exsentences=4&exlimit=3&redirects=1"
+                  val j = JSONObject(http(url, "GET", null, API_UA, "application/json"))
+                  val pages = j.optJSONObject("query")?.optJSONObject("pages") ?: return emptyList()
+                  val tmp = ArrayList<Pair<Int, WebHit>>()
+                  val keys = pages.keys()
+                  while (keys.hasNext()) {
+                      val k = keys.next()
+                      val p = pages.getJSONObject(k)
+                      val ex = p.optString("extract", "").trim()
+                      if (ex.isEmpty()) continue
+                      tmp.add(Pair(p.optInt("index", 99), WebHit(p.optString("title", ""), ex.take(700), "Wikipédia", "https://" + lang + ".wikipedia.org/wiki/" + enc(p.optString("title", "").replace(' ', '_')))))
+                  }
+                  tmp.sortBy { it.first }
+                  val out = ArrayList<WebHit>()
+                  for (p in tmp) out.add(p.second)
+                  return out
+              }
+
+              private fun tagText(block: String, tag: String): String {
+                  val m = Regex("<" + tag + "(?:\\s[^>]*)?>(.*?)</" + tag + ">", RegexOption.DOT_MATCHES_ALL).find(block) ?: return ""
+                  return clean(m.groupValues[1].replace("<![CDATA[", "").replace("]]>", ""))
+              }
+
+              private fun news(topic: String): List<WebHit> {
+                  val url = if (topic.isBlank()) "https://news.google.com/rss?hl=pt-BR&gl=BR&ceid=BR:pt-419"
+                  else "https://news.google.com/rss/search?q=" + enc(topic) + "&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+                  val xml = http(url, "GET", null, API_UA, "application/rss+xml,application/xml,text/xml")
+                  val out = ArrayList<WebHit>()
+                  val itemRe = Regex("<item>(.*?)</item>", RegexOption.DOT_MATCHES_ALL)
+                  for (m in itemRe.findAll(xml)) {
+                      val blk = m.groupValues[1]
+                      var title = tagText(blk, "title")
+                      val src = tagText(blk, "source")
+                      val date = tagText(blk, "pubDate").take(16)
+                      if (src.isNotEmpty() && title.endsWith(" - " + src)) title = title.removeSuffix(" - " + src)
+                      if (title.isNotEmpty()) {
+                          val meta = (if (src.isNotEmpty()) src else "") + (if (date.isNotEmpty()) ", " + date else "")
+                          out.add(WebHit(title, "", meta, tagText(blk, "link")))
+                      }
+                      if (out.size >= 6) break
+                  }
+                  return out
+              }
+
+              // ---------- montagem do contexto ----------
+
+              private suspend fun generalCtx(raw: String, log: (String) -> Unit): WebCtx? {
+              // pesquisa SOMENTE o dado pedido, nunca a frase inteira
+              val q = searchQuery(raw)
+              log("Busca: " + q)
+              val nq = leadRe.replace(norm(raw), "")
+              val definitional = defRe.containsMatchIn(nq)
+              return coroutineScope {
+                  val webD = async(Dispatchers.IO) { runSrc("DuckDuckGo", log) { ddg(q) } }
+                  val wikiD = async(Dispatchers.IO) {
+                      if (definitional) runSrc("Wikipédia", log) { wiki(q) } else emptyList<WebHit>()
+                  }
+                  var hits = webD.await()
+                  if (hits.isEmpty()) hits = withContext(Dispatchers.IO) { runSrc("Bing", log) { bing(q) } }
+                  var wk = wikiD.await()
+                  if (hits.isEmpty() && wk.isEmpty() && !definitional) {
+                      wk = withContext(Dispatchers.IO) { runSrc("Wikipédia", log) { wiki(q) } }
+                  }
+                  if (hits.isEmpty() && wk.isEmpty()) {
+                      wk = withContext(Dispatchers.IO) { runSrc("Wikipédia EN", log) { wiki(q, "en") } }
+                  }
+                  if (hits.isEmpty() && wk.isEmpty()) {
+                      null
+                  } else {
+                      val urls = ArrayList<String>()
+                      val sb = StringBuilder()
+                      // SEMPRE entra no primeiro site da lista e lê a página inteira.
+                      // Só passa para o próximo se a página não abrir / vier vazia.
+                      var pageRead = false
+                      for (h in hits.filter { pageOk(it.url) }.take(3)) {
+                          val tx = try {
+                              withContext(Dispatchers.IO) { pageText(h.url, q, PAGE_CHARS) }
+                          } catch (t: CancellationException) {
+                              throw t
+                          } catch (t: Throwable) {
+                              log("Página falhou: " + h.url + " " + t.message)
+                              ""
+                          }
+                          if (tx.isNotEmpty()) {
+                              sb.append("PÁGINA LIDA POR COMPLETO (").append(h.source).append(" - ").append(h.title).append("):\n").append(tx).append("\n\n")
+                              urls.add(h.url)
+                              pageRead = true
+                              log("Página lida: " + h.url + " (" + tx.length + " caracteres)")
+                              break
+                          }
+                      }
+                      // resumos dos resultados só como apoio (depois da página)
+                      sb.append("Outros resultados:\n")
+                      val firstWiki = wk.take(1)
+                      sb.append(fmt(firstWiki, 0, 500))
+                      sb.append(fmt(hits.take(3), firstWiki.size, 200))
+                      if (!pageRead) for (h in hits.take(3)) if (h.url.isNotEmpty()) urls.add(h.url)
+                      for (h in firstWiki) if (h.url.isNotEmpty()) urls.add(h.url)
+                      WebCtx(sb.toString().take(MAX_CHARS), null, urls)
+                  }
+              }
+          }
+          private suspend fun newsCtx(raw: String, log: (String) -> Unit): WebCtx? {
+                  val topic = newsTopic(raw)
+                  val hits = withContext(Dispatchers.IO) { runSrc("Google Notícias", log) { news(topic) } }
+                  if (hits.isEmpty()) return null
+                  val head = if (topic.isBlank()) "Principais manchetes do Brasil:\n" else "Manchetes sobre " + topic + ":\n"
+                  val urls = ArrayList<String>()
+                            for (h in hits.take(3)) if (h.url.isNotEmpty()) urls.add(h.url)
+                            return WebCtx((head + fmt(hits.take(5), 0, 0)).take(MAX_CHARS), null, urls)
+              }
+
+              private fun wmo(c: Int): String = when (c) {
+                  0 -> "céu limpo"
+                  1 -> "predominantemente limpo"
+                  2 -> "parcialmente nublado"
+                  3 -> "nublado"
+                  45, 48 -> "neblina"
+                  51, 53, 55 -> "garoa"
+                  56, 57 -> "garoa congelante"
+                  61 -> "chuva fraca"
+                  63 -> "chuva moderada"
+                  65 -> "chuva forte"
+                  66, 67 -> "chuva congelante"
+                  71, 73, 75, 77 -> "neve"
+                  80 -> "pancadas de chuva fracas"
+                  81 -> "pancadas de chuva moderadas"
+                  82 -> "pancadas de chuva fortes"
+                  85, 86 -> "pancadas de neve"
+                  95 -> "tempestade"
+                  96, 99 -> "tempestade com granizo"
+                  else -> "tempo indefinido"
+              }
+
+              private fun rd(d: Double): String = Math.round(d).toString()
+
+              private fun ipLocation(log: (String) -> Unit): Triple<Double, Double, String>? {
+                  try {
+                      val j = JSONObject(http("https://ipwho.is/", "GET", null, API_UA, "application/json"))
+                      if (j.optBoolean("success", false)) {
+                          return Triple(j.getDouble("latitude"), j.getDouble("longitude"), j.optString("city", "") + ", " + j.optString("region", ""))
+                      }
+                  } catch (t: Throwable) {
+                      log("IP (ipwho.is) falhou: " + t.message)
+                  }
+                  try {
+                      val j = JSONObject(http("https://get.geojs.io/v1/ip/geo.json", "GET", null, API_UA, "application/json"))
+                      return Triple(j.getString("latitude").toDouble(), j.getString("longitude").toDouble(), j.optString("city", "") + ", " + j.optString("region", ""))
+                  } catch (t: Throwable) {
+                      log("IP (geojs) falhou: " + t.message)
+                  }
+                  return null
+              }
+
+              private suspend fun weatherCtx(raw: String, savedCity: String, log: (String) -> Unit): WebCtx? {
+                  return withContext(Dispatchers.IO) {
+                      val explicit = cityFrom(raw)
+                      val cityQ = if (explicit.isNotEmpty()) explicit else savedCity
+                      var lat = 0.0
+                      var lon = 0.0
+                      var label = ""
+                      var ok = false
+                      var estimated = false
+                      if (cityQ.isNotEmpty()) {
+                          try {
+                              val g = JSONObject(http("https://geocoding-api.open-meteo.com/v1/search?name=" + enc(cityQ) + "&count=1&language=pt&format=json", "GET", null, API_UA, "application/json"))
+                              val arr = g.optJSONArray("results")
+                              if (arr != null && arr.length() > 0) {
+                                  val o = arr.getJSONObject(0)
+                                  lat = o.getDouble("latitude")
+                                  lon = o.getDouble("longitude")
+                                  val adm = o.optString("admin1", "")
+                                  label = o.optString("name", cityQ) + (if (adm.isNotEmpty()) ", " + adm else "") + ", " + o.optString("country", "")
+                                  ok = true
+                              }
+                          } catch (t: Throwable) {
+                              log("Geocodificação falhou: " + t.message)
+                          }
+                      }
+                      if (!ok) {
+                          val ip = ipLocation(log)
+                          if (ip != null) {
+                              lat = ip.first
+                              lon = ip.second
+                              label = ip.third
+                              ok = true
+                              estimated = true
+                          }
+                      }
+                      if (!ok) return@withContext null
+                      val url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
+                          "&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m" +
+                          "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
+                          "&timezone=auto&forecast_days=3"
+                      val j = JSONObject(http(url, "GET", null, API_UA, "application/json"))
+                      val cur = j.getJSONObject("current")
+                      val d = j.getJSONObject("daily")
+                      val sb = StringBuilder()
+                      sb.append("Local: " + label + (if (estimated) " (local estimado pelo IP da TV)" else "") + ".\n")
+                      sb.append("Agora: " + rd(cur.getDouble("temperature_2m")) + " graus, sensação de " + rd(cur.getDouble("apparent_temperature")) +
+                          " graus, " + wmo(cur.optInt("weather_code", -1)) + ", umidade de " + rd(cur.optDouble("relative_humidity_2m", 0.0)) +
+                          " por cento, vento de " + rd(cur.optDouble("wind_speed_10m", 0.0)) + " quilômetros por hora.\n")
+                      val codes = d.getJSONArray("weather_code")
+                      val tmax = d.getJSONArray("temperature_2m_max")
+                      val tmin = d.getJSONArray("temperature_2m_min")
+                      val pp = d.optJSONArray("precipitation_probability_max")
+                      val names = listOf("Hoje", "Amanhã", "Depois de amanhã")
+                      val n = minOf(3, codes.length(), tmax.length(), tmin.length())
+                      for (i in 0 until n) {
+                          var line = names[i] + ": mínima de " + rd(tmin.getDouble(i)) + ", máxima de " + rd(tmax.getDouble(i)) + " graus, " + wmo(codes.optInt(i, -1))
+                          if (pp != null) {
+                              val pr = pp.optDouble(i, -1.0)
+                              if (pr >= 0.0) line += ", chance de chuva de " + rd(pr) + " por cento"
+                          }
+                          sb.append(line).append(".\n")
+                      }
+                      WebCtx(sb.toString(), if (explicit.isNotEmpty()) explicit else null)
+                  }
+              }
+          }
+
+          object JarvisCloud {
+              private fun baseUrl(raw: String): String {
+                  var b = raw.trim().trimEnd('/')
+                  if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b
+                  return b
+              }
+
+              private fun open(base: String, path: String, key: String, method: String, connectMs: Int, readMs: Int): HttpURLConnection {
+                  val c = URL(baseUrl(base) + path).openConnection() as HttpURLConnection
+                  c.connectTimeout = connectMs
+                  c.readTimeout = readMs
+                  c.requestMethod = method
+                  c.setRequestProperty("X-API-Key", key.trim())
+                  c.setRequestProperty("X-Client", "tv")
+                  c.setRequestProperty("ngrok-skip-browser-warning", "1")
+                  c.setRequestProperty("Accept-Encoding", "identity")
+                  c.setRequestProperty("User-Agent", "JarvisApp/2.0")
+                  return c
+              }
+
+              fun health(base: String, key: String): Boolean {
+                  val c = open(base, "/health", key, "GET", 8000, 15000)
+                  try {
+                      if (c.responseCode != 200) return false
+                      val body = c.inputStream.bufferedReader(Charsets.UTF_8).use { r -> r.readText() }
+                      return JSONObject(body).optBoolean("ok", false)
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+
+              fun stream(base: String, key: String, system: String, hist: List<Pair<Boolean, String>>, message: String, maxTokens: Int, onPiece: (String) -> Unit) {
+                  val body = JSONObject()
+                  body.put("system", system)
+                  val arr = org.json.JSONArray()
+                  for (h in hist) {
+                      val o = JSONObject()
+                      o.put("role", if (h.first) "user" else "assistant")
+                      o.put("content", h.second)
+                      arr.put(o)
+                  }
+                  body.put("history", arr)
+                  body.put("message", message)
+                  body.put("max_new_tokens", maxTokens)
+                  body.put("temperature", 0.7)
+                  val c = open(base, "/chat", key, "POST", 10000, 120000)
+                  try {
+                      c.doOutput = true
+                      c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                      c.setRequestProperty("Accept", "text/event-stream")
+                      val bytes = body.toString().toByteArray(Charsets.UTF_8)
+                      c.outputStream.use { os -> os.write(bytes) }
+                      val rc = c.responseCode
+                      if (rc != 200) {
+                          var err = ""
+                          try {
+                              err = c.errorStream?.bufferedReader(Charsets.UTF_8)?.use { r -> r.readText() }?.take(200) ?: ""
+                          } catch (t: Throwable) {
+                          }
+                          throw RuntimeException("HTTP " + rc + " " + err)
+                      }
+                      var gotDone = false
+                      c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                          while (true) {
+                              val line = r.readLine() ?: break
+                              if (!line.startsWith("data:")) continue
+                              val js = JSONObject(line.substring(5).trim())
+                              if (js.has("error")) throw RuntimeException(js.optString("error"))
+                              val t = js.optString("t", "")
+                              if (t.isNotEmpty()) onPiece(t)
+                              if (js.optBoolean("done", false)) {
+                                  gotDone = true
+                                  break
+                              }
+                          }
+                      }
+                      if (!gotDone) throw RuntimeException("conexão encerrada antes do fim da resposta")
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+          }
+          JVEOF
+
+          cat > tv/app/src/main/kotlin/br/local/jarvis/tv/Orb.kt <<'JVEOF'
+          package br.local.jarvis.tv
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.view.View
+          import kotlin.math.cos
+          import kotlin.math.sin
+          import kotlin.math.sqrt
+
+          enum class St { IDLE, LISTENING, THINKING, SPEAKING }
+
+          // Esfera branca de "sinapses": nós e conexões girando em 3D, com pulsos viajando pelas ligações.
+          // A cor muda com o estado (mesma paleta da orbe antiga): branca em repouso, verde ouvindo, âmbar pensando, ciano falando.
+          class SynapseOrb(ctx: Context) : View(ctx) {
+              @Volatile var state: St = St.IDLE
+              @Volatile var level: Float = 0f
+              var centerY: Float = 0.42f
+
+              private class Cand(val d: Float, val a: Int, val b: Int)
+
+              private val outerCount = 104
+              private val n = 124
+              private val px = FloatArray(n)
+              private val py = FloatArray(n)
+              private val pz = FloatArray(n)
+              private val sx = FloatArray(n)
+              private val sy = FloatArray(n)
+              private val sd = FloatArray(n)
+              private var ea = IntArray(0)
+              private var eb = IntArray(0)
+              private var adj: Array<IntArray> = Array(0) { IntArray(0) }
+              private var buckets: Array<FloatArray> = Array(4) { FloatArray(0) }
+              private val bcount = IntArray(4)
+
+              private val pm = 18
+              private val pEdge = IntArray(pm)
+              private val pT = FloatArray(pm)
+              private val pSpeed = FloatArray(pm)
+              private val pDir = IntArray(pm)
+              private val rnd = java.util.Random(42L)
+
+              private var yaw = 0f
+              private var clock = 0f
+              private var last = 0L
+              private var cr = 255f
+              private var cg = 255f
+              private var cb = 255f
+              private var hr = 159f
+              private var hg = 216f
+              private var hb = 255f
+              private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val lineP = Paint(Paint.ANTI_ALIAS_FLAG)
+
+              init {
+                  val golden = Math.PI * (3.0 - Math.sqrt(5.0))
+                  for (i in 0 until outerCount) {
+                      val y = 1.0 - 2.0 * (i + 0.5) / outerCount
+                      val r = Math.sqrt(1.0 - y * y)
+                      val th = golden * i
+                      val x = Math.cos(th) * r + (rnd.nextDouble() - 0.5) * 0.07
+                      val yy = y + (rnd.nextDouble() - 0.5) * 0.07
+                      val z = Math.sin(th) * r + (rnd.nextDouble() - 0.5) * 0.07
+                      val len = Math.sqrt(x * x + yy * yy + z * z)
+                      px[i] = (x / len).toFloat()
+                      py[i] = (yy / len).toFloat()
+                      pz[i] = (z / len).toFloat()
+                  }
+                  for (i in outerCount until n) {
+                      val gx = rnd.nextGaussian()
+                      val gy = rnd.nextGaussian()
+                      val gz = rnd.nextGaussian()
+                      val len = Math.sqrt(gx * gx + gy * gy + gz * gz) + 0.000001
+                      val rr = 0.28 + rnd.nextDouble() * 0.45
+                      px[i] = (gx / len * rr).toFloat()
+                      py[i] = (gy / len * rr).toFloat()
+                      pz[i] = (gz / len * rr).toFloat()
+                  }
+                  buildEdges()
+                  for (k in 0 until pm) resetPulse(k)
+              }
+
+              private fun buildEdges() {
+                  val cands = ArrayList<Cand>()
+                  for (i in 0 until n) {
+                      for (j in (i + 1) until n) {
+                          val dx = px[i] - px[j]
+                          val dy = py[i] - py[j]
+                          val dz = pz[i] - pz[j]
+                          val d = sqrt(dx * dx + dy * dy + dz * dz)
+                          val lim = if (i < outerCount && j < outerCount) 0.52f else 0.62f
+                          if (d < lim) cands.add(Cand(d, i, j))
+                      }
+                  }
+                  cands.sortBy { it.d }
+                  val deg = IntArray(n)
+                  val la = ArrayList<Int>()
+                  val lb = ArrayList<Int>()
+                  for (c in cands) {
+                      if (deg[c.a] >= 6 || deg[c.b] >= 6) continue
+                      deg[c.a] = deg[c.a] + 1
+                      deg[c.b] = deg[c.b] + 1
+                      la.add(c.a)
+                      lb.add(c.b)
+                  }
+                  ea = IntArray(la.size) { la[it] }
+                  eb = IntArray(lb.size) { lb[it] }
+                  val tmp = Array(n) { ArrayList<Int>() }
+                  for (e in ea.indices) {
+                      tmp[ea[e]].add(e)
+                      tmp[eb[e]].add(e)
+                  }
+                  adj = Array(n) { i -> IntArray(tmp[i].size) { k -> tmp[i][k] } }
+                  buckets = Array(4) { FloatArray(ea.size * 4) }
+              }
+
+              private fun resetPulse(k: Int) {
+                  if (ea.isEmpty()) return
+                  pEdge[k] = rnd.nextInt(ea.size)
+                  pT[k] = rnd.nextFloat()
+                  pSpeed[k] = 0.45f + rnd.nextFloat() * 0.9f
+                  pDir[k] = if (rnd.nextBoolean()) 1 else -1
+              }
+
+              // quando o pulso chega ao fim da ligação, continua por outra ligação do mesmo nó (o sinal "viaja" pela rede)
+              private fun nextPulse(k: Int) {
+                  val e = pEdge[k]
+                  val node = if (pDir[k] > 0) eb[e] else ea[e]
+                  val opts = adj[node]
+                  if (opts.size > 1) {
+                      var ne = e
+                      var tries = 0
+                      while (ne == e && tries < 5) {
+                          ne = opts[rnd.nextInt(opts.size)]
+                          tries++
+                      }
+                      pEdge[k] = ne
+                      pDir[k] = if (ea[ne] == node) 1 else -1
+                      pT[k] = 0f
+                      pSpeed[k] = 0.45f + rnd.nextFloat() * 0.9f
+                  } else {
+                      resetPulse(k)
+                      pT[k] = 0f
+                  }
+              }
+
+              override fun onAttachedToWindow() {
+                  super.onAttachedToWindow()
+                  last = 0L
+              }
+
+              override fun onDraw(canvas: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  if (w < 10f || h < 10f || ea.isEmpty()) return
+                  val now = System.nanoTime()
+                  var dt = if (last == 0L) 0.016f else (now - last) / 1000000000f
+                  last = now
+                  if (dt > 0.05f) dt = 0.05f
+                  clock += dt
+
+                  var spin = 0.14f
+                  var mix = 0f
+                  var tint = 0xFF9FD8FF.toInt()
+                  var active = 5
+                  var pSpd = 0.7f
+                  var breathe = 0.012f
+                  var breatheSpd = 0.9f
+                  var glow = 1f
+                  when (state) {
+                      St.IDLE -> {
+                      }
+                      St.LISTENING -> {
+                          spin = 0.22f
+                          mix = 0.78f
+                          tint = 0xFF00E676.toInt()
+                          active = 9
+                          pSpd = 1.0f
+                          breathe = 0.02f
+                          breatheSpd = 2.4f
+                          glow = 1.1f
+                      }
+                      St.THINKING -> {
+                          spin = 0.85f
+                          mix = 0.8f
+                          tint = 0xFFFFB300.toInt()
+                          active = pm
+                          pSpd = 2.2f
+                          breathe = 0.01f
+                          breatheSpd = 4f
+                          glow = 1.15f
+                      }
+                      St.SPEAKING -> {
+                          spin = 0.32f
+                          mix = 0.7f
+                          tint = 0xFF40C4FF.toInt()
+                          active = 13
+                          pSpd = 1.4f
+                          breathe = 0.05f
+                          breatheSpd = 3.2f
+                          glow = 1.0f
+                      }
+                  }
+
+                  // cor atual (suavizada) de nós e ligações, e cor do halo
+                  val tr = Color.red(tint).toFloat()
+                  val tg = Color.green(tint).toFloat()
+                  val tb = Color.blue(tint).toFloat()
+                  val k = Math.min(1f, dt * 5f)
+                  cr += (255f + (tr - 255f) * mix - cr) * k
+                  cg += (255f + (tg - 255f) * mix - cg) * k
+                  cb += (255f + (tb - 255f) * mix - cb) * k
+                  hr += (tr - hr) * k
+                  hg += (tg - hg) * k
+                  hb += (tb - hb) * k
+
+                  var amp = 0f
+                  if (state == St.LISTENING) {
+                      amp = level
+                  } else if (state == St.SPEAKING) {
+                      amp = 0.35f + 0.35f * sin(clock * 6.5f) * sin(clock * 2.1f + 1f)
+                  }
+                  if (amp < 0f) amp = 0f
+                  if (amp > 1f) amp = 1f
+
+                  val cx = w / 2f
+                  val cy = h * centerY
+                  val baseR = Math.min(w, h) * 0.30f
+                  val rad = baseR * (1f + breathe * sin(clock * breatheSpd) + amp * 0.10f)
+                  val unit = rad / 200f
+
+                  // halo suave
+                  paint.style = Paint.Style.FILL
+                  val haloA = Math.min(255, (13f * glow * (1f + amp)).toInt())
+                  for (i in 0..6) {
+                      paint.color = Color.argb(haloA, hr.toInt(), hg.toInt(), hb.toInt())
+                      canvas.drawCircle(cx, cy, rad * (1f + 0.09f * i), paint)
+                  }
+                  // corpo e borda da esfera
+                  paint.color = Color.argb(22, 255, 255, 255)
+                  canvas.drawCircle(cx, cy, rad, paint)
+                  paint.style = Paint.Style.STROKE
+                  paint.strokeWidth = unit * 1.6f
+                  paint.color = Color.argb(90, cr.toInt(), cg.toInt(), cb.toInt())
+                  canvas.drawCircle(cx, cy, rad, paint)
+                  paint.style = Paint.Style.FILL
+
+                  // rotação 3D
+                  yaw += spin * dt * (1f + amp * 1.5f)
+                  val tilt = 0.35f + 0.12f * sin(clock * 0.4f)
+                  val cyaw = cos(yaw)
+                  val syaw = sin(yaw)
+                  val ct = cos(tilt)
+                  val st = sin(tilt)
+                  for (i in 0 until n) {
+                      val x1 = px[i] * cyaw + pz[i] * syaw
+                      val z1 = -px[i] * syaw + pz[i] * cyaw
+                      val y2 = py[i] * ct - z1 * st
+                      val z2 = py[i] * st + z1 * ct
+                      var d = (z2 + 1f) * 0.5f
+                      if (d < 0f) d = 0f
+                      if (d > 1f) d = 1f
+                      val s = 0.82f + 0.30f * d
+                      sx[i] = cx + x1 * rad * s
+                      sy[i] = cy + y2 * rad * s
+                      sd[i] = d
+                  }
+
+                  // ligações, agrupadas por profundidade (4 faixas de brilho)
+                  for (b in 0..3) bcount[b] = 0
+                  for (e in ea.indices) {
+                      val a = ea[e]
+                      val b2 = eb[e]
+                      val d = (sd[a] + sd[b2]) * 0.5f
+                      var bi = (d * 4f).toInt()
+                      if (bi > 3) bi = 3
+                      if (bi < 0) bi = 0
+                      val arr = buckets[bi]
+                      val c = bcount[bi]
+                      arr[c] = sx[a]
+                      arr[c + 1] = sy[a]
+                      arr[c + 2] = sx[b2]
+                      arr[c + 3] = sy[b2]
+                      bcount[bi] = c + 4
+                  }
+                  lineP.style = Paint.Style.STROKE
+                  lineP.strokeCap = Paint.Cap.ROUND
+                  for (b in 0..3) {
+                      lineP.color = Color.argb(34 + b * 40, cr.toInt(), cg.toInt(), cb.toInt())
+                      lineP.strokeWidth = unit * (0.9f + 0.55f * b)
+                      canvas.drawLines(buckets[b], 0, bcount[b], lineP)
+                  }
+
+                  // nós
+                  paint.style = Paint.Style.FILL
+                  for (i in 0 until n) {
+                      val d = sd[i]
+                      val r = unit * (1.1f + 2.4f * d)
+                      if (d > 0.72f) {
+                          paint.color = Color.argb(38, cr.toInt(), cg.toInt(), cb.toInt())
+                          canvas.drawCircle(sx[i], sy[i], r * 2.6f, paint)
+                      }
+                      paint.color = Color.argb(70 + (185f * d).toInt(), cr.toInt(), cg.toInt(), cb.toInt())
+                      canvas.drawCircle(sx[i], sy[i], r, paint)
+                  }
+
+                  // pulsos de sinal
+                  for (i in 0 until pm) {
+                      pT[i] += dt * pSpeed[i] * pSpd
+                      if (pT[i] >= 1f) nextPulse(i)
+                      if (i >= active) continue
+                      val e = pEdge[i]
+                      val a = ea[e]
+                      val b2 = eb[e]
+                      val t = if (pDir[i] > 0) pT[i] else 1f - pT[i]
+                      val x = sx[a] + (sx[b2] - sx[a]) * t
+                      val y = sy[a] + (sy[b2] - sy[a]) * t
+                      val d = (sd[a] + sd[b2]) * 0.5f
+                      val r = unit * (2.2f + 2.0f * d)
+                      paint.color = Color.argb(55 + (60f * d).toInt(), hr.toInt(), hg.toInt(), hb.toInt())
+                      canvas.drawCircle(x, y, r * 2.8f, paint)
+                      paint.color = Color.argb(150 + (100f * d).toInt(), 255, 255, 255)
+                      canvas.drawCircle(x, y, r, paint)
+                  }
+
+                  postInvalidateOnAnimation()
+              }
+          }
+          JVEOF
+
+          cat > tv/app/src/main/kotlin/br/local/jarvis/tv/Panels.kt <<'JVEOF'
+          package br.local.jarvis.tv
+
+          import android.content.Context
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.Typeface
+          import android.view.View
+          import org.json.JSONObject
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.net.URLEncoder
+          import java.util.Calendar
+
+          object Pal {
+              val BG = 0xFF05070D.toInt()
+              val BG2 = 0xFF0A1226.toInt()
+              val CARD = 0xCC0C1424.toInt()
+              val LINE = 0xFF1B2A44.toInt()
+              val TEXT = 0xFFEAF6FF.toInt()
+              val MUTED = 0xFF8196AE.toInt()
+              val ACCENT = 0xFF00E5FF.toInt()
+              val OK = 0xFF00E676.toInt()
+              val BAD = 0xFFFF5252.toInt()
+              val WARN = 0xFFFFB300.toInt()
+          }
+
+          // Calendário do mês atual, com o dia de hoje destacado.
+          class MonthView(ctx: Context) : View(ctx) {
+              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val wd = arrayOf("D", "S", "T", "Q", "Q", "S", "S")
+              private val months = arrayOf(
+                  "Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho",
+                  "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+              )
+
+              override fun onDraw(canvas: Canvas) {
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  if (w < 10f || h < 10f) return
+                  val now = Calendar.getInstance()
+                  val year = now.get(Calendar.YEAR)
+                  val month = now.get(Calendar.MONTH)
+                  val today = now.get(Calendar.DAY_OF_MONTH)
+                  val first = Calendar.getInstance()
+                  first.set(year, month, 1)
+                  val startDow = first.get(Calendar.DAY_OF_WEEK) - 1
+                  val dim = first.getActualMaximum(Calendar.DAY_OF_MONTH)
+
+                  val cellW = w / 7f
+                  val titleH = h * 0.14f
+                  val wdH = h * 0.11f
+                  val rowH = (h - titleH - wdH) / 6f
+                  val ts = Math.min(cellW, rowH) * 0.46f
+
+                  p.style = Paint.Style.FILL
+                  p.textAlign = Paint.Align.LEFT
+                  p.typeface = Typeface.DEFAULT_BOLD
+                  p.color = Pal.TEXT
+                  p.textSize = titleH * 0.62f
+                  canvas.drawText(months[month] + " " + year, 0f, titleH * 0.72f, p)
+
+                  p.textAlign = Paint.Align.CENTER
+                  p.textSize = ts * 0.78f
+                  for (i in 0..6) {
+                      p.color = if (i == 0) Pal.WARN else Pal.MUTED
+                      canvas.drawText(wd[i], cellW * (i + 0.5f), titleH + wdH * 0.72f, p)
+                  }
+
+                  p.textSize = ts
+                  for (d in 1..dim) {
+                      val idx = startDow + d - 1
+                      val col = idx % 7
+                      val row = idx / 7
+                      val cx = cellW * (col + 0.5f)
+                      val cy = titleH + wdH + rowH * (row + 0.5f)
+                      val base = cy - (p.ascent() + p.descent()) / 2f
+                      if (d == today) {
+                          p.color = Pal.ACCENT
+                          canvas.drawCircle(cx, cy, Math.min(cellW, rowH) * 0.42f, p)
+                          p.color = Pal.BG
+                          p.typeface = Typeface.DEFAULT_BOLD
+                      } else {
+                          p.color = if (col == 0) Pal.WARN else Pal.TEXT
+                          p.typeface = Typeface.DEFAULT
+                      }
+                      canvas.drawText(d.toString(), cx, base, p)
+                  }
+              }
+          }
+
+          class WeatherData(val label: String, val temp: Int, val feels: Int, val tmin: Int, val tmax: Int, val code: Int, val rain: Int)
+
+          // Temperatura atual da cidade (Open-Meteo, grátis e sem chave).
+          object TvWeather {
+              private const val UA = "JarvisTV/1.0 (assistente pessoal Android TV)"
+
+              private fun http(url: String): String {
+                  val c = URL(url).openConnection() as HttpURLConnection
+                  try {
+                      c.connectTimeout = 8000
+                      c.readTimeout = 10000
+                      c.setRequestProperty("User-Agent", UA)
+                      c.setRequestProperty("Accept", "application/json")
+                      if (c.responseCode != 200) throw RuntimeException("HTTP " + c.responseCode)
+                      return c.inputStream.bufferedReader(Charsets.UTF_8).use { r -> r.readText() }
+                  } finally {
+                      c.disconnect()
+                  }
+              }
+
+              fun fetch(city: String): WeatherData? {
+                  var lat = 0.0
+                  var lon = 0.0
+                  var label = ""
+                  var ok = false
+                  if (city.isNotBlank()) {
+                      try {
+                          val g = JSONObject(http("https://geocoding-api.open-meteo.com/v1/search?name=" + URLEncoder.encode(city.trim(), "UTF-8") + "&count=1&language=pt&format=json"))
+                          val arr = g.optJSONArray("results")
+                          if (arr != null && arr.length() > 0) {
+                              val o = arr.getJSONObject(0)
+                              lat = o.getDouble("latitude")
+                              lon = o.getDouble("longitude")
+                              label = o.optString("name", city)
+                              ok = true
+                          }
+                      } catch (t: Throwable) {
+                      }
+                  }
+                  if (!ok) {
+                      try {
+                          val j = JSONObject(http("https://ipwho.is/"))
+                          if (j.optBoolean("success", false)) {
+                              lat = j.getDouble("latitude")
+                              lon = j.getDouble("longitude")
+                              label = j.optString("city", "")
+                              ok = true
+                          }
+                      } catch (t: Throwable) {
+                      }
+                  }
+                  if (!ok) return null
+                  val url = "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon +
+                      "&current=temperature_2m,apparent_temperature,weather_code" +
+                      "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max" +
+                      "&timezone=auto&forecast_days=1"
+                  val j = JSONObject(http(url))
+                  val cur = j.getJSONObject("current")
+                  val d = j.getJSONObject("daily")
+                  val tmax = d.getJSONArray("temperature_2m_max")
+                  val tmin = d.getJSONArray("temperature_2m_min")
+                  val pp = d.optJSONArray("precipitation_probability_max")
+                  val rain = if (pp != null) pp.optInt(0, -1) else -1
+                  return WeatherData(
+                      label,
+                      Math.round(cur.getDouble("temperature_2m")).toInt(),
+                      Math.round(cur.getDouble("apparent_temperature")).toInt(),
+                      Math.round(tmin.getDouble(0)).toInt(),
+                      Math.round(tmax.getDouble(0)).toInt(),
+                      cur.optInt("weather_code", -1),
+                      rain
+                  )
+              }
+
+              fun desc(c: Int): String = when (c) {
+                  0 -> "Céu limpo"
+                  1 -> "Quase limpo"
+                  2 -> "Parcialmente nublado"
+                  3 -> "Nublado"
+                  45, 48 -> "Neblina"
+                  51, 53, 55 -> "Garoa"
+                  56, 57 -> "Garoa congelante"
+                  61 -> "Chuva fraca"
+                  63 -> "Chuva moderada"
+                  65 -> "Chuva forte"
+                  66, 67 -> "Chuva congelante"
+                  71, 73, 75, 77 -> "Neve"
+                  80 -> "Pancadas fracas"
+                  81 -> "Pancadas moderadas"
+                  82 -> "Pancadas fortes"
+                  85, 86 -> "Pancadas de neve"
+                  95 -> "Tempestade"
+                  96, 99 -> "Tempestade com granizo"
+                  else -> "Tempo indefinido"
+              }
+
+              fun emoji(c: Int): String = when (c) {
+                  0 -> "☀️"
+                  1 -> "🌤️"
+                  2 -> "⛅"
+                  3 -> "☁️"
+                  45, 48 -> "🌫️"
+                  51, 53, 55, 56, 57 -> "🌦️"
+                  61, 63, 65, 66, 67, 80, 81, 82 -> "🌧️"
+                  71, 73, 75, 77, 85, 86 -> "❄️"
+                  95, 96, 99 -> "⛈️"
+                  else -> "🌡️"
+              }
+          }
+          JVEOF
+
+          cat > tv/app/src/main/kotlin/br/local/jarvis/tv/Setup.kt <<'JVEOF'
+          package br.local.jarvis.tv
+
+          import java.io.BufferedReader
+          import java.io.InputStreamReader
+          import java.net.Inet4Address
+          import java.net.NetworkInterface
+          import java.net.ServerSocket
+          import java.net.Socket
+          import java.net.URLDecoder
+
+          // Endereço da TV na rede local (para abrir a página de ajustes pelo celular).
+          fun lanIp(): String? {
+              try {
+                  val ifs = NetworkInterface.getNetworkInterfaces() ?: return null
+                  for (ni in ifs) {
+                      if (!ni.isUp || ni.isLoopback) continue
+                      for (a in ni.inetAddresses) {
+                          if (a is Inet4Address && a.isSiteLocalAddress) return a.hostAddress
+                      }
+                  }
+              } catch (t: Throwable) {
+              }
+              return null
+          }
+
+          fun htmlEsc(s: String): String =
+              s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;")
+
+          // Mini servidor HTTP que só roda enquanto a tela de Ajustes está aberta.
+          // Permite preencher URL/chave/cidade pelo celular (digitar na TV com o controle é ruim).
+          // Protegido por um PIN mostrado na TV; os dados só preenchem os campos, quem confirma é a TV.
+          class SetupServer(
+              private val port: Int,
+              private val pin: String,
+              private val formHtml: () -> String,
+              private val onSave: (Map<String, String>) -> Boolean
+          ) {
+              @Volatile private var running = false
+              private var server: ServerSocket? = null
+
+              fun start(): Boolean {
+                  return try {
+                      val s = ServerSocket(port)
+                      server = s
+                      running = true
+                      Thread { loop(s) }.start()
+                      true
+                  } catch (t: Throwable) {
+                      false
+                  }
+              }
+
+              fun stop() {
+                  running = false
+                  try {
+                      server?.close()
+                  } catch (t: Throwable) {
+                  }
+              }
+
+              private fun loop(s: ServerSocket) {
+                  while (running) {
+                      try {
+                          val c = s.accept()
+                          try {
+                              handle(c)
+                          } finally {
+                              try {
+                                  c.close()
+                              } catch (t: Throwable) {
+                              }
+                          }
+                      } catch (t: Throwable) {
+                          if (!running) break
+                      }
+                  }
+              }
+
+              private fun handle(c: Socket) {
+                  c.soTimeout = 6000
+                  val reader = BufferedReader(InputStreamReader(c.getInputStream(), Charsets.ISO_8859_1))
+                  val first = reader.readLine() ?: return
+                  val parts = first.split(" ")
+                  if (parts.size < 2) return
+                  val method = parts[0]
+                  val path = parts[1]
+                  var len = 0
+                  while (true) {
+                      val line = reader.readLine() ?: break
+                      if (line.isEmpty()) break
+                      if (line.lowercase().startsWith("content-length:")) {
+                          len = line.substring(15).trim().toIntOrNull() ?: 0
+                      }
+                  }
+                  var body = ""
+                  if (method == "POST" && len > 0 && len <= 32768) {
+                      val buf = CharArray(len)
+                      var got = 0
+                      while (got < len) {
+                          val k = reader.read(buf, got, len - got)
+                          if (k < 0) break
+                          got += k
+                      }
+                      body = String(buf, 0, got)
+                  }
+                  if (method == "POST" && path.startsWith("/save")) {
+                      val m = parseForm(body)
+                      val ok = m["pin"] == pin && onSave(m)
+                      respond(c, if (ok) 200 else 403, page(if (ok) "Enviado para a TV ✓. Agora confirme na TV, em Salvar e conectar." else "PIN incorreto ou dados inválidos. Volte e tente de novo."))
+                  } else if (method == "GET") {
+                      respond(c, 200, formHtml())
+                  } else {
+                      respond(c, 405, page("Método não permitido."))
+                  }
+              }
+
+              private fun parseForm(body: String): Map<String, String> {
+                  val out = HashMap<String, String>()
+                  for (pair in body.split("&")) {
+                      val i = pair.indexOf('=')
+                      if (i <= 0) continue
+                      try {
+                          out[URLDecoder.decode(pair.substring(0, i), "UTF-8")] = URLDecoder.decode(pair.substring(i + 1), "UTF-8")
+                      } catch (t: Throwable) {
+                      }
+                  }
+                  return out
+              }
+
+              private fun respond(c: Socket, code: Int, html: String) {
+                  val bytes = html.toByteArray(Charsets.UTF_8)
+                  val status = if (code == 200) "OK" else if (code == 403) "Forbidden" else "Error"
+                  val head = "HTTP/1.1 " + code + " " + status + "\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " +
+                      bytes.size + "\r\nConnection: close\r\n\r\n"
+                  val os = c.getOutputStream()
+                  os.write(head.toByteArray(Charsets.ISO_8859_1))
+                  os.write(bytes)
+                  os.flush()
+              }
+
+              private fun page(msg: String): String =
+                  "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+                      "<title>Jarvis TV</title><style>body{font-family:sans-serif;background:#070b14;color:#e0f7ff;padding:24px;font-size:18px}</style></head><body><h2>Jarvis TV</h2><p>" +
+                      htmlEsc(msg) + "</p></body></html>"
+          }
+          JVEOF
+
+          cat > tv/app/src/main/kotlin/br/local/jarvis/tv/MainActivity.kt <<'JVEOF'
+          package br.local.jarvis.tv
+
+          import android.Manifest
+          import android.app.Activity
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.Outline
+          import android.graphics.Typeface
+          import android.graphics.drawable.ColorDrawable
+          import android.graphics.drawable.GradientDrawable
+          import android.net.ConnectivityManager
+          import android.net.NetworkCapabilities
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.content.Intent
+          import android.text.InputType
+          import android.util.TypedValue
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.ViewOutlineProvider
+          import android.view.WindowInsets
+          import android.view.WindowInsetsController
+          import android.view.WindowManager
+          import android.view.inputmethod.EditorInfo
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.Switch
+          import android.widget.TextClock
+          import android.widget.TextView
+          import android.widget.Toast
+          import kotlinx.coroutines.CancellationException
+          import kotlinx.coroutines.CoroutineScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.SupervisorJob
+          import kotlinx.coroutines.TimeoutCancellationException
+          import kotlinx.coroutines.cancel
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import java.net.URLEncoder
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          private const val WEB_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+
+          private const val IDLE_HTML = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" +
+              "<style>html,body{height:100%;margin:0;background:#0a1220;color:#8196ae;font-family:sans-serif}" +
+              "body{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:0 24px}" +
+              ".d{width:14px;height:14px;border-radius:50%;background:#00e5ff;margin-bottom:22px;opacity:.8}" +
+              "h1{font-size:22px;font-weight:600;color:#eaf6ff;margin:0 0 10px}p{font-size:16px;margin:0;line-height:1.4}</style></head>" +
+              "<body><div class=\"d\"></div><h1>Pesquisa ao vivo</h1><p>Os sites que o Jarvis consultar aparecem aqui.</p></body></html>"
+
+          class MainActivity : Activity() {
+              private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
+              private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+
+              private val ui = Handler(Looper.getMainLooper())
+              private val scope = CoroutineScope(Dispatchers.Default + SupervisorJob() + kotlinx.coroutines.CoroutineExceptionHandler { _, e -> onBgError(e) })
+              private lateinit var prefs: SharedPreferences
+              private var unit = 1f
+
+              private lateinit var orb: SynapseOrb
+              private lateinit var statusTv: TextView
+              private lateinit var heardTv: TextView
+              private lateinit var replyTv: TextView
+              private lateinit var connTv: TextView
+              private lateinit var hintTv: TextView
+              private lateinit var webHost: TextView
+              private lateinit var webDot: View
+              private lateinit var webBox: FrameLayout
+              private var web: WebView? = null
+              private lateinit var clockTv: TextClock
+              private lateinit var dateTv: TextView
+              private lateinit var wCity: TextView
+              private lateinit var wTemp: TextView
+              private lateinit var wDesc: TextView
+              private lateinit var wSub: TextView
+              private lateinit var monthView: MonthView
+
+              private var state = St.IDLE
+              private var busy = false
+              private var cloudOk = false
+              private var speakOn = true
+              private var genDone = true
+              private var lastVoice = false
+              private var noSpeechCount = 0
+              private var ttsEpoch = 0
+              private var utt = 0
+              private var ttsPending = 0
+              private var ttsReady = false
+              private var tts: TextToSpeech? = null
+              private var recognizer: SpeechRecognizer? = null
+              private val hist = ArrayList<Pair<Boolean, String>>()
+              private var visitGen = 0
+              private var lastBack = 0L
+              private var longHandled = false
+              private var setupServer: SetupServer? = null
+              private var settingsDialog: AlertDialog? = null
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      updateDate()
+                      monthView.invalidate()
+                      ui.postDelayed(this, 30000)
+                  }
+              }
+
+              private val weatherTick = object : Runnable {
+                  override fun run() {
+                      loadWeather()
+                      ui.postDelayed(this, 1200000)
+                  }
+              }
+
+              // ---------------------------------------------------------------- ciclo de vida
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  prefs = getSharedPreferences("tv", Context.MODE_PRIVATE)
+                  loadHist()
+                  val oldH = Thread.getDefaultUncaughtExceptionHandler()
+                  Thread.setDefaultUncaughtExceptionHandler { th, e ->
+                      try {
+                          prefs.edit().putString("crash", android.util.Log.getStackTraceString(e).take(2500)).commit()
+                      } catch (t: Throwable) {
+                      }
+                      if (oldH != null) oldH.uncaughtException(th, e)
+                  }
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  if (Build.VERSION.SDK_INT >= 28) {
+                      window.attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                  }
+                  window.setBackgroundDrawable(ColorDrawable(Pal.BG))
+                  val dm = resources.displayMetrics
+                  unit = Math.min(dm.widthPixels, dm.heightPixels) / 1080f
+
+                  setContentView(buildUi())
+                  hideSystemUi()
+                  showLastCrash()
+                  setupWeb()
+                  initTts()
+                  setState(St.IDLE)
+                  updateDate()
+                  ui.postDelayed(tick, 30000)
+                  ui.post(weatherTick)
+
+                  if (gs("url").isBlank() || gs("key").isBlank()) {
+                      ui.postDelayed({ openSettings() }, 600)
+                  } else {
+                      connectCloud()
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  web?.onResume()
+              }
+
+              override fun onPause() {
+                  super.onPause()
+                  web?.onPause()
+              }
+
+              override fun onWindowFocusChanged(hasFocus: Boolean) {
+                  super.onWindowFocusChanged(hasFocus)
+                  if (hasFocus) hideSystemUi()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  ui.removeCallbacksAndMessages(null)
+                  stopSetupServer()
+                  try {
+                      recognizer?.destroy()
+                  } catch (t: Throwable) {
+                  }
+                  try {
+                      tts?.stop()
+                      tts?.shutdown()
+                  } catch (t: Throwable) {
+                  }
+                  try {
+                      web?.destroy()
+                  } catch (t: Throwable) {
+                  }
+                  scope.cancel()
+              }
+
+              @Suppress("DEPRECATION")
+              private fun hideSystemUi() {
+                  try {
+                      hideSystemUiRaw()
+                  } catch (t: Throwable) {
+                  }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun hideSystemUiRaw() {
+                  if (Build.VERSION.SDK_INT >= 30) {
+                      window.setDecorFitsSystemWindows(false)
+                      val c = window.insetsController
+                      if (c != null) {
+                          c.hide(WindowInsets.Type.systemBars())
+                          c.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                      }
+                  } else {
+                      window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                          View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                          View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                          View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                          View.SYSTEM_UI_FLAG_FULLSCREEN or
+                          View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                  }
+              }
+
+              private fun onBgError(e: Throwable) {
+                  try {
+                      prefs.edit().putString("crash", "BG " + android.util.Log.getStackTraceString(e).take(2000)).apply()
+                  } catch (t: Throwable) {
+                  }
+                  runOnUiThread {
+                      busy = false
+                      genDone = true
+                      toast("Erro: " + e.javaClass.simpleName + ": " + e.message)
+                      setState(St.IDLE)
+                  }
+              }
+
+              private fun showLastCrash() {
+                  val c = gs("crash")
+                  if (c.isBlank()) return
+                  prefs.edit().remove("crash").apply()
+                  ui.postDelayed({
+                      try {
+                          val t = TextView(this)
+                          t.text = c
+                          t.isFocusable = true
+                          t.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(18).toFloat())
+                          t.setPadding(u(30), u(10), u(30), u(10))
+                          val sv = ScrollView(this)
+                          sv.addView(t)
+                          AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                              .setTitle("O app fechou por erro na ultima vez")
+                              .setView(sv)
+                              .setPositiveButton("OK", null)
+                              .show()
+                      } catch (t: Throwable) {
+                      }
+                  }, 1500)
+              }
+
+              private fun resetWeb() {
+                  visitGen++
+                  try {
+                      web?.let { webBox.removeView(it); it.destroy() }
+                  } catch (t: Throwable) {
+                  }
+                  web = null
+                  webBox.removeAllViews()
+                  setupWeb()
+              }
+
+              // ---------------------------------------------------------------- helpers
+
+              private fun gs(k: String, d: String = ""): String = prefs.getString(k, d) ?: d
+
+              private fun gb(k: String, d: Boolean): Boolean = prefs.getBoolean(k, d)
+
+              private fun u(v: Int): Int = Math.max(1, Math.round(v * unit))
+
+              private fun toast(m: String) {
+                  runOnUiThread { Toast.makeText(this, m, Toast.LENGTH_LONG).show() }
+              }
+
+              private fun shape(fill: Int, radius: Int, stroke: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(fill)
+                  g.cornerRadius = u(radius).toFloat()
+                  if (stroke != 0) g.setStroke(Math.max(1, u(2)), stroke)
+                  return g
+              }
+
+              private fun tv(t: String, px: Int, color: Int, bold: Boolean = false): TextView {
+                  val v = TextView(this)
+                  v.text = t
+                  v.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(px).toFloat())
+                  v.setTextColor(color)
+                  if (bold) v.typeface = Typeface.DEFAULT_BOLD
+                  return v
+              }
+
+              private fun colLp(weight: Float, left: Int, right: Int): LinearLayout.LayoutParams {
+                  val l = LinearLayout.LayoutParams(0, MATCH, weight)
+                  l.leftMargin = u(left)
+                  l.rightMargin = u(right)
+                  return l
+              }
+
+              private fun vLp(top: Int): LinearLayout.LayoutParams {
+                  val l = LinearLayout.LayoutParams(MATCH, WRAP)
+                  l.topMargin = u(top)
+                  return l
+              }
+
+              private fun nowStr(): String =
+                  SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy, HH:mm", Locale("pt", "BR")).format(Date())
+
+              private fun isOnline(): Boolean {
+                  val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                  val net = cm.activeNetwork ?: return false
+                  val nc = cm.getNetworkCapabilities(net) ?: return false
+                  return nc.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+              }
+
+              // ---------------------------------------------------------------- interface
+
+              private fun buildUi(): View {
+                  val root = FrameLayout(this)
+                  root.background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Pal.BG, Pal.BG2, Pal.BG))
+
+                  val row = LinearLayout(this)
+                  row.orientation = LinearLayout.HORIZONTAL
+                  row.setPadding(u(40), u(34), u(40), u(34))
+                  root.addView(row, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  row.addView(buildLeft(), colLp(30f, 0, 14))
+                  row.addView(buildCenter(), colLp(38f, 14, 14))
+                  row.addView(buildRight(), colLp(32f, 14, 0))
+                  return root
+              }
+
+              private fun buildLeft(): View {
+                  val card = LinearLayout(this)
+                  card.orientation = LinearLayout.VERTICAL
+                  card.background = shape(Pal.CARD, 28, Pal.LINE)
+
+                  val head = LinearLayout(this)
+                  head.orientation = LinearLayout.HORIZONTAL
+                  head.gravity = Gravity.CENTER_VERTICAL
+                  head.setPadding(u(26), u(22), u(26), u(14))
+                  webDot = View(this)
+                  webDot.background = shape(Pal.MUTED, 10, 0)
+                  head.addView(webDot, LinearLayout.LayoutParams(u(16), u(16)))
+                  webHost = tv("PESQUISA AO VIVO", 24, Pal.MUTED, true)
+                  webHost.letterSpacing = 0.10f
+                  webHost.maxLines = 1
+                  webHost.ellipsize = android.text.TextUtils.TruncateAt.END
+                  val hl = LinearLayout.LayoutParams(0, WRAP, 1f)
+                  hl.leftMargin = u(14)
+                  head.addView(webHost, hl)
+                  card.addView(head, LinearLayout.LayoutParams(MATCH, WRAP))
+
+                  webBox = FrameLayout(this)
+                  webBox.clipToOutline = true
+                  webBox.outlineProvider = object : ViewOutlineProvider() {
+                      override fun getOutline(view: View, outline: Outline) {
+                          outline.setRoundRect(0, 0, view.width, view.height, u(20).toFloat())
+                      }
+                  }
+                  val bl = LinearLayout.LayoutParams(MATCH, 0, 1f)
+                  bl.leftMargin = u(16)
+                  bl.rightMargin = u(16)
+                  bl.bottomMargin = u(16)
+                  card.addView(webBox, bl)
+                  return card
+              }
+
+              private fun buildCenter(): View {
+                  val box = FrameLayout(this)
+                  orb = SynapseOrb(this)
+                  box.addView(orb, FrameLayout.LayoutParams(MATCH, MATCH))
+
+                  connTv = tv("", 24, Pal.MUTED, true)
+                  connTv.letterSpacing = 0.08f
+                  val cl = FrameLayout.LayoutParams(WRAP, WRAP, Gravity.TOP or Gravity.CENTER_HORIZONTAL)
+                  cl.topMargin = u(6)
+                  box.addView(connTv, cl)
+
+                  val bottom = LinearLayout(this)
+                  bottom.orientation = LinearLayout.VERTICAL
+                  bottom.gravity = Gravity.CENTER_HORIZONTAL
+                  bottom.setPadding(u(20), 0, u(20), u(8))
+
+                  statusTv = tv("", 26, Pal.MUTED, true)
+                  statusTv.letterSpacing = 0.18f
+                  statusTv.gravity = Gravity.CENTER
+                  bottom.addView(statusTv, vLp(0))
+
+                  heardTv = tv("", 28, Pal.MUTED)
+                  heardTv.gravity = Gravity.CENTER
+                  heardTv.typeface = Typeface.create("sans-serif", Typeface.ITALIC)
+                  heardTv.maxLines = 2
+                  heardTv.ellipsize = android.text.TextUtils.TruncateAt.END
+                  bottom.addView(heardTv, vLp(10))
+
+                  replyTv = tv("", 40, Pal.TEXT)
+                  replyTv.gravity = Gravity.CENTER
+                  replyTv.minLines = 3
+                  replyTv.maxLines = 4
+                  replyTv.ellipsize = android.text.TextUtils.TruncateAt.END
+                  bottom.addView(replyTv, vLp(12))
+
+                  hintTv = tv("OK  falar     •     ▼  digitar     •     segure OK ou ▲  ajustes", 22, Pal.MUTED)
+                  hintTv.gravity = Gravity.CENTER
+                  bottom.addView(hintTv, vLp(16))
+
+                  box.addView(bottom, FrameLayout.LayoutParams(MATCH, WRAP, Gravity.BOTTOM))
+                  return box
+              }
+
+              private fun buildRight(): View {
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+
+                  val c1 = LinearLayout(this)
+                  c1.orientation = LinearLayout.VERTICAL
+                  c1.background = shape(Pal.CARD, 28, Pal.LINE)
+                  c1.setPadding(u(32), u(20), u(32), u(22))
+                  clockTv = TextClock(this)
+                  clockTv.format24Hour = "HH:mm"
+                  clockTv.format12Hour = "HH:mm"
+                  clockTv.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(150).toFloat())
+                  clockTv.setTextColor(Pal.TEXT)
+                  clockTv.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                  clockTv.includeFontPadding = false
+                  c1.addView(clockTv, LinearLayout.LayoutParams(WRAP, WRAP))
+                  dateTv = tv("", 32, Pal.MUTED)
+                  c1.addView(dateTv, vLp(4))
+                  col.addView(c1, LinearLayout.LayoutParams(MATCH, WRAP))
+
+                  val c2 = LinearLayout(this)
+                  c2.orientation = LinearLayout.VERTICAL
+                  c2.background = shape(Pal.CARD, 28, Pal.LINE)
+                  c2.setPadding(u(32), u(22), u(32), u(24))
+                  wCity = tv("TEMPO", 24, Pal.MUTED, true)
+                  wCity.letterSpacing = 0.12f
+                  c2.addView(wCity, LinearLayout.LayoutParams(MATCH, WRAP))
+                  wTemp = tv("--°", 120, Pal.TEXT)
+                  wTemp.typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                  wTemp.includeFontPadding = false
+                  c2.addView(wTemp, vLp(6))
+                  wDesc = tv("Buscando…", 34, Pal.TEXT)
+                  c2.addView(wDesc, vLp(2))
+                  wSub = tv("", 26, Pal.MUTED)
+                  c2.addView(wSub, vLp(6))
+                  col.addView(c2, vLp(20))
+
+                  val c3 = LinearLayout(this)
+                  c3.orientation = LinearLayout.VERTICAL
+                  c3.background = shape(Pal.CARD, 28, Pal.LINE)
+                  c3.setPadding(u(28), u(22), u(28), u(22))
+                  monthView = MonthView(this)
+                  c3.addView(monthView, LinearLayout.LayoutParams(MATCH, MATCH))
+                  val l3 = LinearLayout.LayoutParams(MATCH, 0, 1f)
+                  l3.topMargin = u(20)
+                  col.addView(c3, l3)
+                  return col
+              }
+
+              private fun updateDate() {
+                  val s = SimpleDateFormat("EEEE, d 'de' MMMM", Locale("pt", "BR")).format(Date())
+                  dateTv.text = if (s.isEmpty()) s else s.substring(0, 1).uppercase() + s.substring(1)
+              }
+
+              private fun updateConn() {
+                  if (cloudOk) {
+                      connTv.text = "● SERVIDOR CONECTADO"
+                      connTv.setTextColor(Pal.OK)
+                  } else if (gs("url").isBlank()) {
+                      connTv.text = "● SERVIDOR NÃO CONFIGURADO"
+                      connTv.setTextColor(Pal.WARN)
+                  } else {
+                      connTv.text = "● SERVIDOR FORA DO AR"
+                      connTv.setTextColor(Pal.BAD)
+                  }
+              }
+
+              private fun setState(s: St) {
+                  runOnUiThread {
+                      state = s
+                      orb.state = s
+                      statusTv.text = when (s) {
+                          St.IDLE -> if (cloudOk) "PRONTO" else "AGUARDANDO SERVIDOR"
+                          St.LISTENING -> "OUVINDO…"
+                          St.THINKING -> "PENSANDO…"
+                          St.SPEAKING -> "FALANDO…"
+                      }
+                      statusTv.setTextColor(when (s) {
+                          St.IDLE -> 0xFF9FD8FF.toInt()
+                          St.LISTENING -> 0xFF00E676.toInt()
+                          St.THINKING -> 0xFFFFB300.toInt()
+                          St.SPEAKING -> 0xFF40C4FF.toInt()
+                      })
+                      updateConn()
+                  }
+              }
+
+              // ---------------------------------------------------------------- WebView (pesquisa ao vivo)
+
+              private fun setupWeb() {
+                  try {
+                      val w = WebView(this)
+                      val s = w.settings
+                      s.javaScriptEnabled = true
+                      s.domStorageEnabled = true
+                      s.loadWithOverviewMode = true
+                      s.useWideViewPort = true
+                      s.userAgentString = WEB_UA
+                      w.isFocusable = false
+                      w.isFocusableInTouchMode = false
+                      w.setBackgroundColor(0xFF0A1220.toInt())
+                      w.webViewClient = object : WebViewClient() {
+                          override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                              runOnUiThread { webState(true, url) }
+                          }
+
+                          override fun onPageFinished(view: WebView?, url: String?) {
+                              runOnUiThread { webState(false, url) }
+                          }
+
+                          override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                          runOnUiThread { resetWeb() }
+                          return true
+                      }
+
+                          override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                              val u = request?.url?.toString() ?: return false
+                              return !(u.startsWith("http://") || u.startsWith("https://"))
+                          }
+                      }
+                      webBox.addView(w, FrameLayout.LayoutParams(MATCH, MATCH))
+                      web = w
+                      w.loadDataWithBaseURL(null, IDLE_HTML, "text/html", "utf-8", null)
+                  } catch (t: Throwable) {
+                      web = null
+                      val msg = tv("WebView não disponível nesta TV.", 26, Pal.MUTED)
+                      msg.gravity = Gravity.CENTER
+                      webBox.addView(msg, FrameLayout.LayoutParams(MATCH, MATCH))
+                  }
+              }
+
+              private fun webState(loading: Boolean, url: String?) {
+                  webDot.background = shape(if (loading) Pal.WARN else Pal.OK, 10, 0)
+                  var host = ""
+                  if (url != null && url.startsWith("http")) {
+                      host = try {
+                          java.net.URL(url).host.removePrefix("www.")
+                      } catch (t: Throwable) {
+                          ""
+                      }
+                  }
+                  webHost.text = if (host.isEmpty()) "PESQUISA AO VIVO" else host.uppercase()
+              }
+
+              private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
+
+              private fun showSearchPage(mode: WebMode, text: String) {
+                  val w = web ?: return
+                  val url = when (mode) {
+                      WebMode.NEWS -> {
+                          val topic = JarvisWeb.newsTopic(text)
+                          if (topic.isBlank()) "https://news.google.com/?hl=pt-BR&gl=BR&ceid=BR:pt-419"
+                          else "https://news.google.com/search?q=" + enc(topic) + "&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+                      }
+                      WebMode.WEATHER -> {
+                          val c = JarvisWeb.cityFrom(text).ifEmpty { gs("city") }
+                          "https://www.bing.com/search?q=" + enc("previsão do tempo " + c) + "&setlang=pt-BR&cc=BR"
+                      }
+                      else -> "https://www.bing.com/search?q=" + enc(JarvisWeb.searchQuery(text)) + "&setlang=pt-BR&cc=BR"
+                  }
+                  try {
+                      w.loadUrl(url)
+                  } catch (t: Throwable) {
+                  }
+              }
+
+              // depois da pesquisa, o WebView "visita" os primeiros resultados, um de cada vez
+              private fun visitUrls(urls: List<String>) {
+                  val w = web ?: return
+                  visitGen++
+                  val gen = visitGen
+                  var delay = 1500L
+                  for (u in urls.take(3)) {
+                      ui.postDelayed({
+                          if (gen == visitGen) {
+                              try {
+                                  w.loadUrl(u)
+                              } catch (t: Throwable) {
+                              }
+                          }
+                      }, delay)
+                      delay += 7000L
+                  }
+              }
+
+              // ---------------------------------------------------------------- tempo
+
+              private fun loadWeather() {
+                  val city = gs("city")
+                  scope.launch {
+                      var w: WeatherData? = null
+                      try {
+                          w = withContext(Dispatchers.IO) { TvWeather.fetch(city) }
+                      } catch (t: CancellationException) {
+                          throw t
+                      } catch (t: Throwable) {
+                      }
+                      val d = w
+                      runOnUiThread {
+                          if (d == null) {
+                              wTemp.text = "--°"
+                              wDesc.text = "Sem dados do tempo"
+                              wSub.text = if (city.isBlank()) "Defina a cidade nos ajustes." else ""
+                          } else {
+                              wCity.text = "TEMPO  •  " + d.label.uppercase()
+                              wTemp.text = d.temp.toString() + "°"
+                              wDesc.text = TvWeather.emoji(d.code) + "  " + TvWeather.desc(d.code)
+                              val rain = if (d.rain >= 0) "   •   chuva " + d.rain + "%" else ""
+                              wSub.text = "Sensação " + d.feels + "°   •   mín " + d.tmin + "°  máx " + d.tmax + "°" + rain
+                          }
+                      }
+                  }
+              }
+
+              // ---------------------------------------------------------------- nuvem
+
+              private fun connectCloud() {
+                  val u = gs("url")
+                  val k = gs("key")
+                  if (u.isBlank() || k.isBlank()) {
+                      cloudOk = false
+                      setState(state)
+                      return
+                  }
+                  connTv.text = "● CONECTANDO…"
+                  connTv.setTextColor(Pal.MUTED)
+                  scope.launch {
+                      var ok = false
+                      try {
+                          ok = withContext(Dispatchers.IO) { JarvisCloud.health(u, k) }
+                      } catch (t: CancellationException) {
+                          throw t
+                      } catch (t: Throwable) {
+                      }
+                      cloudOk = ok
+                      setState(state)
+                  }
+              }
+
+              private fun defaultPersona(): String =
+                  "Você é Jarvis, um assistente pessoal de voz inspirado no Jarvis do Homem de Ferro, que fica na TV da sala. " +
+                  "Fale sempre em português do Brasil, nunca em chinês ou inglês, a menos que peçam. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
+                  "Responda em no máximo 3 frases curtas. Não use markdown, listas, emojis nem símbolos, porque suas respostas serão faladas em voz alta. " +
+                  "Se não souber algo, diga com honestidade."
+
+              private fun defaultWebPrompt(): String =
+              "ACESSO À INTERNET: você TEM acesso à internet em tempo real. Quem pesquisa é o aplicativo da TV: quando o usuário pergunta algo atual ou factual, o app busca na web e coloca o resultado no começo da mensagem, em um bloco que começa com 'Resultados de pesquisa obtidos agora na internet', 'Manchetes recentes obtidas agora na internet' ou 'Dados de clima obtidos agora na internet'. Esse bloco é informação real e atual, não é fala do usuário. Mensagens que começam com '[Nota:' são avisos do aplicativo, também não são fala do usuário. " +
+              "COMO USAR: 1) Nunca diga que não tem acesso à internet nem que é apenas um modelo de linguagem. " +
+              "2) Quando houver bloco de pesquisa, responda com base nele; se ele contradisser o que você lembra, vale o bloco. " +
+              "3) Procure o dado exato pedido (data, número, nome, preço, horário) e responda direto, sem enrolar. " +
+              "4) Se o dado não aparecer, diga que pesquisou e não encontrou, e nunca invente datas, números, nomes ou fatos. " +
+              "5) Sem bloco de pesquisa, se a pergunta for sobre algo que muda com o tempo (preços, placares, notícias, lançamentos, cargos), avise que pode estar desatualizado e sugira pedir para você pesquisar. " +
+              "6) Cite a fonte só se ajudar e em poucas palavras (por exemplo: segundo o G1), e jamais leia endereços ou links. " +
+              "7) Escreva números, datas e horários de um jeito fácil de ouvir. " +
+              "RECOMENDAÇÕES: quando pedirem indicação (filme, série, jogo, música, restaurante, produto, passeio), dê de 1 a 3 opções concretas, a melhor primeiro, cada uma com um motivo curto, priorizando o que a pesquisa trouxer e o gosto que o usuário já mencionou. Se faltar um detalhe essencial (orçamento, gênero, cidade), faça no máximo uma pergunta curta. Não invente nomes de lugares, preços ou notas: o que não estiver na pesquisa, apresente como sugestão geral e diga que vale confirmar. Mesmo nas recomendações, use no máximo 4 frases curtas, sem listas."
+
+          private fun noWebPrompt(): String =
+              "ACESSO À INTERNET: a pesquisa na internet está desligada nos ajustes neste momento. Responda com o que você sabe e avise quando algo puder estar desatualizado."
+
+          private fun buildSystemPrompt(): String {
+                  val city = gs("city")
+                  val custom = gs("prompt").trim()
+                  val persona = if (custom.isNotEmpty()) custom.take(2000) else defaultPersona()
+                  val webCustom = gs("webprompt").trim()
+                  val webPart = if (!gb("web", true)) noWebPrompt() else if (webCustom.isNotEmpty()) webCustom.take(2500) else defaultWebPrompt()
+                  return persona +
+                      (if (notes().isEmpty()) "" else "\nFatos que o usuário pediu para você lembrar: " + notes().joinToString("; ") + ".") +
+                      "\nData e hora atuais: " + nowStr() + "." +
+                      (if (city.isBlank()) "" else "\nCidade do usuário: " + city + ".") +
+                      "\n" + webPart
+              }
+
+              private fun loadHist() {
+                  try {
+                      val raw = gs("hist")
+                      if (raw.isEmpty()) return
+                      hist.clear()
+                      for (line in raw.split("\n")) {
+                          if (line.length < 3) continue
+                          hist.add(Pair(line[0] == 'U', line.substring(2)))
+                      }
+                  } catch (t: Throwable) {
+                  }
+              }
+
+              private fun saveHist() {
+                  try {
+                      val sb = StringBuilder()
+                      for (h in hist.takeLast(12)) {
+                          sb.append(if (h.first) "U " else "A ").append(h.second.replace("\n", " ").take(300)).append("\n")
+                      }
+                      prefs.edit().putString("hist", sb.toString().trimEnd()).apply()
+                  } catch (t: Throwable) {
+                  }
+              }
+
+              private fun notes(): List<String> = gs("notes").split("\n").filter { it.isNotBlank() }
+
+              private fun addNote(n: String) {
+                  val l = notes().toMutableList()
+                  l.add(n.take(200))
+                  prefs.edit().putString("notes", l.takeLast(20).joinToString("\n")).apply()
+              }
+
+              // comandos locais (exatos, sem depender do modelo): anotar, hora e data
+              private fun handleCommand(text: String): Boolean {
+                  val noteM = Regex("^(?:jarvis[, ]+)?(?:lembre-se|lembre se|lembre|anote|guarde|memorize)\\s+(?:que\\s+|de\\s+)?(.+)$", RegexOption.IGNORE_CASE).find(text.trim())
+                  if (noteM != null) {
+                      addNote(noteM.groupValues[1])
+                      reply("Anotado. Vou me lembrar disso.")
+                      return true
+                  }
+                  if (Regex("^(?:esque[cç]a tudo|apague as anota[cç][oõ]es|limpe a mem[oó]ria)").containsMatchIn(text.trim().lowercase())) {
+                      prefs.edit().remove("notes").remove("hist").apply()
+                      hist.clear()
+                      reply("Memória apagada.")
+                      return true
+                  }
+                  val n = JarvisWeb.norm(text).replace(Regex("\\bjarvis\\b"), " ").replace(Regex("\\s+"), " ").trim()
+                  if (n.length <= 32 && Regex("\\b(?:que horas|horas sao|hora atual|me diga as horas|qual a hora)\\b").containsMatchIn(n)) {
+                      val cal = java.util.Calendar.getInstance()
+                      val h = cal.get(java.util.Calendar.HOUR_OF_DAY)
+                      val m = cal.get(java.util.Calendar.MINUTE)
+                      val hs = when (h) {
+                          0 -> "É meia-noite"
+                          1 -> "É uma hora"
+                          12 -> "É meio-dia"
+                          else -> "São " + h + " horas"
+                      }
+                      val ms = if (m > 0) " e " + m + (if (m > 1) " minutos" else " minuto") else ""
+                      reply(hs + ms + ".")
+                      return true
+                  }
+                  if (Regex("^(?:que dia e hoje|qual e a data de hoje|qual a data de hoje|data de hoje|que data e hoje|em que dia estamos|hoje e que dia)\\b").containsMatchIn(n)) {
+                      val f = SimpleDateFormat("EEEE, d 'de' MMMM 'de' yyyy", Locale("pt", "BR"))
+                      reply("Hoje é " + f.format(Date()) + ".")
+                      return true
+                  }
+                  return false
+              }
+
+              private fun cloudHistory(): List<Pair<Boolean, String>> {
+                  val out = ArrayList<Pair<Boolean, String>>()
+                  for (h in hist.takeLast(8)) {
+                      if (out.isEmpty() && !h.first) continue
+                      if (out.isNotEmpty() && out[out.size - 1].first == h.first) out.removeAt(out.size - 1)
+                      out.add(h)
+                  }
+                  if (out.isNotEmpty() && out[out.size - 1].first) out.removeAt(out.size - 1)
+                  return out
+              }
+
+              // ---------------------------------------------------------------- voz: fala (TTS)
+
+              private fun initTts() {
+                  tts = TextToSpeech(this, TextToSpeech.OnInitListener { st ->
+                      if (st == TextToSpeech.SUCCESS) {
+                          val t = tts
+                          if (t != null) {
+                              val r = t.setLanguage(Locale("pt", "BR"))
+                              ttsReady = r != TextToSpeech.LANG_MISSING_DATA && r != TextToSpeech.LANG_NOT_SUPPORTED
+                              t.setSpeechRate(1.0f)
+                              t.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                                  override fun onStart(utteranceId: String?) {
+                                      ui.post {
+                                          if (epochOk(utteranceId)) setState(St.SPEAKING)
+                                      }
+                                  }
+
+                                  override fun onDone(utteranceId: String?) {
+                                      ui.post {
+                                          if (epochOk(utteranceId)) ttsDone()
+                                      }
+                                  }
+
+                                  @Deprecated("Deprecated in Java")
+                                  override fun onError(utteranceId: String?) {
+                                      ui.post {
+                                          if (epochOk(utteranceId)) ttsDone()
+                                      }
+                                  }
+                              })
+                              if (!ttsReady) {
+                                  runOnUiThread { heardTv.text = "Voz em português não encontrada nesta TV (instale o Google Text-to-Speech)." }
+                              }
+                          }
+                      }
+                  })
+              }
+
+              private fun epochOk(id: String?): Boolean = id != null && id.startsWith("e" + ttsEpoch + "-")
+
+              private fun ttsDone() {
+                  if (ttsPending > 0) ttsPending--
+                  if (ttsPending == 0 && genDone) finishTurn()
+              }
+
+              private fun speakSentence(s: String) {
+                  if (!speakOn || !ttsReady) return
+                  val c = cleanForSpeech(s)
+                  if (c.length < 2) return
+                  ttsPending++
+                  utt++
+                  tts?.speak(c, TextToSpeech.QUEUE_ADD, null, "e" + ttsEpoch + "-" + utt)
+              }
+
+              private fun stopSpeaking() {
+                  ttsEpoch++
+                  try {
+                      tts?.stop()
+                  } catch (t: Throwable) {
+                  }
+                  ttsPending = 0
+                  speakOn = false
+                  if (genDone) finishTurn() else setState(St.THINKING)
+              }
+
+              private fun cleanForSpeech(s: String): String {
+                  var t = s.replace(Regex("https?://\\S+"), " ")
+                  t = t.replace(Regex("(?m)^\\s*[-•*]\\s+"), "")
+                  val sb = StringBuilder()
+                  var i = 0
+                  while (i < t.length) {
+                      val cp = t.codePointAt(i)
+                      i += Character.charCount(cp)
+                      val keep = Character.isLetterOrDigit(cp) || Character.isWhitespace(cp) ||
+                          (cp < 128 && ".,;:!?'-()%/+\"".indexOf(cp.toChar()) >= 0) || cp == 0x2026
+                      if (keep) sb.appendCodePoint(cp)
+                  }
+                  return sb.toString().replace(Regex("\\s+"), " ").trim()
+              }
+
+              private fun extractSentences(buf: StringBuilder, fin: Boolean): List<String> {
+                  val out = ArrayList<String>()
+                  while (true) {
+                      var cut = -1
+                      for (i in 0 until buf.length) {
+                          val ch = buf[i]
+                          if (ch == '\n') {
+                              cut = i
+                              break
+                          }
+                          if (ch == '.' || ch == '!' || ch == '?' || ch == '…') {
+                              if (i + 1 < buf.length && buf[i + 1].isWhitespace() && i >= 6) {
+                                  cut = i
+                                  break
+                              }
+                              if (fin && i + 1 == buf.length) {
+                                  cut = i
+                                  break
+                              }
+                          }
+                      }
+                      if (cut < 0) break
+                      out.add(buf.substring(0, cut + 1))
+                      buf.delete(0, cut + 1)
+                  }
+                  if (fin && buf.isNotBlank()) {
+                      out.add(buf.toString())
+                      buf.setLength(0)
+                  }
+                  return out
+              }
+
+              private fun reply(text: String) {
+                  busy = true
+                  speakOn = true
+                  genDone = true
+                  replyTv.text = text
+                  val sb = StringBuilder(text)
+                  for (s in extractSentences(sb, true)) speakSentence(s)
+                  if (ttsPending == 0) finishTurn()
+              }
+
+              private fun finishTurn() {
+                  busy = false
+                  setState(St.IDLE)
+                  if (gb("cont", false) && lastVoice && cloudOk) {
+                      ui.postDelayed({
+                          if (state == St.IDLE && !busy) startListening()
+                      }, 700)
+                  }
+              }
+
+              // ---------------------------------------------------------------- voz: escuta
+
+              private fun ensureMic(): Boolean {
+                  if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) return true
+                  requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 11)
+                  return false
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 11) {
+                      if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                          startListening()
+                      } else {
+                          heardTv.text = "Sem permissão de microfone. Use ▼ para digitar."
+                      }
+                  }
+              }
+
+              private fun cancelListening() {
+                  try {
+                      recognizer?.cancel()
+                  } catch (t: Throwable) {
+                  }
+                  orb.level = 0f
+                  setState(St.IDLE)
+              }
+
+              private fun talk() {
+                  if (state == St.LISTENING) {
+                      cancelListening()
+                      return
+                  }
+                  if (state == St.SPEAKING) {
+                      stopSpeaking()
+                  }
+                  startListening()
+              }
+
+              private fun startListening() {
+                  if (state == St.LISTENING) {
+                      cancelListening()
+                      return
+                  }
+                  if (!ensureMic()) return
+                  if (busy) return
+                  if (!cloudOk) {
+                      heardTv.text = "Servidor indisponível. Segure OK para abrir os ajustes."
+                      return
+                  }
+                  if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+                      heardTv.text = "Reconhecimento de voz indisponível nesta TV. Use ▼ para digitar."
+                      return
+                  }
+                  try {
+                      recognizer?.destroy()
+                  } catch (t: Throwable) {
+                  }
+                  val r = SpeechRecognizer.createSpeechRecognizer(this)
+                  recognizer = r
+                  r.setRecognitionListener(object : RecognitionListener {
+                      override fun onReadyForSpeech(params: Bundle?) {}
+                      override fun onBeginningOfSpeech() {}
+                      override fun onRmsChanged(rmsdB: Float) {
+                          orb.level = Math.max(0f, Math.min(1f, (rmsdB + 2f) / 12f))
+                      }
+                      override fun onBufferReceived(buffer: ByteArray?) {}
+                      override fun onEndOfSpeech() {}
+                      override fun onEvent(eventType: Int, params: Bundle?) {}
+                      override fun onPartialResults(partialResults: Bundle?) {
+                          val l = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          val p = l?.firstOrNull()
+                          if (p != null && p.isNotBlank()) heardTv.text = "“" + p + "”"
+                      }
+                      override fun onResults(results: Bundle?) {
+                          orb.level = 0f
+                          val l = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                          val t = l?.firstOrNull()
+                          setState(St.IDLE)
+                          if (t == null || t.isBlank()) {
+                              onListenFail(7)
+                          } else {
+                              noSpeechCount = 0
+                              onUserText(t, false)
+                          }
+                      }
+                      override fun onError(error: Int) {
+                          orb.level = 0f
+                          onListenFail(error)
+                      }
+                  })
+                  val ri = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                  ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                  ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "pt-BR")
+                  ri.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                  ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                  ri.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  heardTv.text = ""
+                  setState(St.LISTENING)
+                  try {
+                      r.startListening(ri)
+                  } catch (t: Throwable) {
+                      setState(St.IDLE)
+                      heardTv.text = "Falha ao iniciar o microfone: " + t.message
+                  }
+              }
+
+              private fun onListenFail(e: Int) {
+                  setState(St.IDLE)
+                  if (e == 6 || e == 7) {
+                      noSpeechCount++
+                      if (gb("cont", false) && noSpeechCount < 3) {
+                          ui.postDelayed({
+                              if (state == St.IDLE && !busy) startListening()
+                          }, 500)
+                      } else {
+                          noSpeechCount = 0
+                          heardTv.text = "Não ouvi nada. Pressione OK para tentar de novo."
+                      }
+                  } else if (e == 9) {
+                      heardTv.text = "Falta permissão de microfone."
+                  } else if (e == 12 || e == 13 || e == 2) {
+                      heardTv.text = "Voz pt-BR indisponível nesta TV. Use ▼ para digitar."
+                  } else if (e != 5) {
+                      heardTv.text = "Erro de voz (código " + e + "). Pressione OK ou use ▼ para digitar."
+                  }
+              }
+
+              // ---------------------------------------------------------------- pergunta -> nuvem
+
+              private fun onUserText(raw: String, typed: Boolean) {
+                  val text = raw.trim()
+                  if (text.isEmpty()) return
+                  lastVoice = !typed
+                  heardTv.text = "“" + text + "”"
+                  if (handleCommand(text)) return
+                  ask(text)
+              }
+
+              private fun ask(text: String) {
+                  if (!cloudOk) {
+                      reply("Não estou conectado ao servidor. Segure o botão OK para abrir os ajustes.")
+                      return
+                  }
+                  busy = true
+                  speakOn = true
+                  genDone = false
+                  visitGen++
+                  replyTv.text = ""
+                  setState(St.THINKING)
+                  val url = gs("url")
+                  val key = gs("key")
+                  scope.launch {
+                      var prompt = text
+                      var directMsg: String? = null
+                      val mode = if (gb("web", true)) JarvisWeb.decide(JarvisWeb.norm(text), "jarvis") else WebMode.NONE
+                      if (mode != WebMode.NONE) {
+                          val strict = mode == WebMode.WEATHER || mode == WebMode.NEWS
+                          if (!isOnline()) {
+                              if (strict) directMsg = "Estou sem conexão com a internet agora, então não consigo consultar isso."
+                              else prompt = NOT_FOUND_NOTE + text
+                          } else {
+                              runOnUiThread { showSearchPage(mode, text) }
+                              var ctx: WebCtx? = null
+                              try {
+                                  ctx = JarvisWeb.fetch(mode, text, gs("city")) { m -> }
+                              } catch (t: TimeoutCancellationException) {
+                              } catch (t: CancellationException) {
+                                  throw t
+                              } catch (t: Throwable) {
+                              }
+                              val c = ctx
+                              if (c != null) {
+                                  prompt = JarvisWeb.wrap(c, text, mode, nowStr())
+                                  val urls = c.urls
+                                  if (urls.isNotEmpty()) runOnUiThread { visitUrls(urls) }
+                              } else if (strict) {
+                                  directMsg = "Não consegui buscar essa informação na internet agora."
+                              } else {
+                                  prompt = NOT_FOUND_NOTE + text
+                              }
+                          }
+                      }
+                      val dm = directMsg
+                      if (dm != null) {
+                          runOnUiThread { reply(dm) }
+                          return@launch
+                      }
+                      val raw = StringBuilder()
+                      val sbuf = StringBuilder()
+                      var shown = ""
+                      var failed: Throwable? = null
+                      fun onPiece(piece: String) {
+                          raw.append(piece)
+                          val vis = raw.toString().trimStart()
+                          if (vis.length > shown.length && vis.startsWith(shown)) {
+                              val d = vis.substring(shown.length)
+                              shown = vis
+                              sbuf.append(d)
+                              val sents = extractSentences(sbuf, false)
+                              val snap = shown
+                              runOnUiThread {
+                                  replyTv.text = snap
+                                  for (s in sents) speakSentence(s)
+                              }
+                          }
+                      }
+                      try {
+                          val cHist = cloudHistory()
+                          val cSys = buildSystemPrompt()
+                          withContext(Dispatchers.IO) {
+                              JarvisCloud.stream(url, key, cSys, cHist, prompt, 400) { p -> onPiece(p) }
+                          }
+                      } catch (t: Throwable) {
+                          failed = t
+                      }
+                      val rest = extractSentences(sbuf, true)
+                      val fl = failed
+                      if (fl == null && shown.isNotBlank()) {
+                          hist.add(Pair(true, text))
+                          hist.add(Pair(false, shown.take(300)))
+                          while (hist.size > 12) hist.removeAt(0)
+                          saveHist()
+                      }
+                      val finalText = shown
+                      runOnUiThread {
+                          genDone = true
+                          if (finalText.isBlank()) {
+                              if (fl != null) {
+                                  cloudOk = false
+                                  reply("Não consegui falar com o servidor. Verifique se o notebook do Kaggle está rodando.")
+                              } else {
+                                  reply("Desculpe, não consegui formular uma resposta.")
+                              }
+                          } else {
+                              replyTv.text = finalText
+                              for (s in rest) speakSentence(s)
+                              if (ttsPending == 0) finishTurn()
+                          }
+                      }
+                  }
+              }
+
+              // ---------------------------------------------------------------- teclas do controle
+
+              private fun isTalkKey(k: Int): Boolean =
+                  k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_NUMPAD_ENTER ||
+                      k == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || k == KeyEvent.KEYCODE_MEDIA_PLAY ||
+                      k == KeyEvent.KEYCODE_SEARCH || k == KeyEvent.KEYCODE_VOICE_ASSIST || k == KeyEvent.KEYCODE_ASSIST
+
+              override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+                  if (isTalkKey(keyCode)) {
+                      event?.startTracking()
+                      return true
+                  }
+                  if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) return true
+                  if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SETTINGS) return true
+                  return super.onKeyDown(keyCode, event)
+              }
+
+              override fun onKeyLongPress(keyCode: Int, event: KeyEvent?): Boolean {
+                  if (isTalkKey(keyCode)) {
+                      longHandled = true
+                      openSettings()
+                      return true
+                  }
+                  return super.onKeyLongPress(keyCode, event)
+              }
+
+              override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+                  if (isTalkKey(keyCode)) {
+                      if (longHandled) {
+                          longHandled = false
+                      } else {
+                          talk()
+                      }
+                      return true
+                  }
+                  if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                      openTyped()
+                      return true
+                  }
+                  if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SETTINGS) {
+                      openSettings()
+                      return true
+                  }
+                  return super.onKeyUp(keyCode, event)
+              }
+
+              override fun onBackPressed() {
+                  val now = System.currentTimeMillis()
+                  if (now - lastBack < 2000) {
+                      super.onBackPressed()
+                  } else {
+                      lastBack = now
+                      toast("Pressione Voltar de novo para sair")
+                  }
+              }
+
+              // ---------------------------------------------------------------- diálogos
+
+              private var tapX = 0f
+              private var tapY = 0f
+              private var tapT = 0L
+
+              override fun dispatchTouchEvent(ev: android.view.MotionEvent?): Boolean {
+                  if (ev != null) {
+                      when (ev.actionMasked) {
+                          android.view.MotionEvent.ACTION_DOWN -> {
+                              tapX = ev.x
+                              tapY = ev.y
+                              tapT = System.currentTimeMillis()
+                          }
+                          android.view.MotionEvent.ACTION_UP -> {
+                              val quick = System.currentTimeMillis() - tapT < 400
+                              val still = Math.abs(ev.x - tapX) < 40 && Math.abs(ev.y - tapY) < 40
+                              if (quick && still && settingsDialog == null) ui.post { openTyped() }
+                          }
+                      }
+                  }
+                  return super.dispatchTouchEvent(ev)
+              }
+
+              private fun openTyped() {
+                  if (settingsDialog != null) return
+                  val et = EditText(this)
+                  et.hint = "Digite sua pergunta"
+                  et.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                  et.imeOptions = EditorInfo.IME_ACTION_SEND
+                  et.setSingleLine(true)
+                  val dlg = AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                      .setTitle("Perguntar ao Jarvis")
+                      .setView(et)
+                      .setPositiveButton("Perguntar") { _, _ -> submitTyped(et.text.toString()) }
+                      .setNegativeButton("Cancelar", null)
+                      .create()
+                  et.setOnEditorActionListener { _, actionId, _ ->
+                      if (actionId == EditorInfo.IME_ACTION_SEND || actionId == EditorInfo.IME_ACTION_DONE) {
+                          dlg.dismiss()
+                          submitTyped(et.text.toString())
+                          true
+                      } else {
+                          false
+                      }
+                  }
+                  dlg.window?.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE)
+                  dlg.show()
+              }
+
+              private fun submitTyped(t: String) {
+                  val s = t.trim()
+                  if (s.isEmpty()) return
+                  if (busy) {
+                      if (state == St.SPEAKING) stopSpeaking() else return
+                  }
+                  onUserText(s, true)
+              }
+
+              private fun inputField(hint: String, value: String, secret: Boolean): EditText {
+                  val e = EditText(this)
+                  e.hint = hint
+                  e.setText(value)
+                  e.setSingleLine(true)
+                  e.inputType = if (secret) {
+                      InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+                  } else {
+                      InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+                  }
+                  return e
+              }
+
+              private fun openSettings() {
+                  if (settingsDialog != null) return
+                  val pin = (1000 + java.util.Random().nextInt(9000)).toString()
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(u(40), u(16), u(40), u(8))
+
+                  val ip = lanIp()
+                  val info = TextView(this)
+                  info.setTextSize(TypedValue.COMPLEX_UNIT_PX, u(24).toFloat())
+                  info.text = if (ip != null) "Dica: preencha pelo celular. Abra  http://" + ip + ":8765  no navegador e digite o PIN  " + pin + "."
+                  else "Conecte a TV ao Wi-Fi para preencher pelo celular."
+                  col.addView(info, LinearLayout.LayoutParams(MATCH, WRAP))
+
+                  val urlEt = inputField("URL do servidor (https://xxxx.ngrok-free.dev)", gs("url"), false)
+                  val keyEt = inputField("API_KEY", gs("key"), true)
+                  val cityEt = inputField("Cidade (para o tempo)", gs("city"), false)
+                  val promptEt = EditText(this)
+                  promptEt.hint = "Prompt do Jarvis (vazio = padrão)"
+                  promptEt.setText(gs("prompt"))
+                  promptEt.minLines = 3
+                  promptEt.maxLines = 6
+                  promptEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                  val webEt = EditText(this)
+                  webEt.hint = "Prompt de internet e recomendações (vazio = padrão)"
+                  webEt.setText(gs("webprompt"))
+                  webEt.minLines = 3
+                  webEt.maxLines = 6
+                  webEt.inputType = promptEt.inputType
+                  val contSw = Switch(this)
+                  contSw.text = "Escuta contínua (reabre o microfone após cada resposta)"
+                  contSw.isChecked = gb("cont", false)
+                  val webSw = Switch(this)
+                  webSw.text = "Pesquisar na internet quando precisar"
+                  webSw.isChecked = gb("web", true)
+                  col.addView(urlEt, vLp(14))
+                  col.addView(keyEt, vLp(6))
+                  col.addView(cityEt, vLp(6))
+                  col.addView(promptEt, vLp(6))
+                  col.addView(webEt, vLp(6))
+                  col.addView(contSw, vLp(14))
+                  col.addView(webSw, vLp(8))
+
+                  val sv = ScrollView(this)
+                  sv.addView(col)
+
+                  val srv = SetupServer(8765, pin, {
+                      "<!doctype html><html lang=\"pt-BR\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Jarvis TV</title>" +
+                          "<style>body{font-family:sans-serif;background:#070b14;color:#e0f7ff;padding:22px;font-size:18px}input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0 16px;font-size:18px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff}" +
+                          "button{width:100%;padding:14px;font-size:19px;font-weight:bold;border:0;border-radius:12px;background:#00e5ff;color:#070b14}label{color:#8196ae}</style></head><body>" +
+                          "<h2>Jarvis na TV</h2><form method=\"POST\" action=\"/save\">" +
+                          "<label>URL do servidor</label><input name=\"url\" value=\"" + htmlEsc(gs("url")) + "\">" +
+                          "<label>API_KEY (deixe vazio para manter a atual)</label><input name=\"key\" type=\"password\" autocomplete=\"off\">" +
+                          "<label>Cidade</label><input name=\"city\" value=\"" + htmlEsc(gs("city")) + "\">" +
+                          "<label>Prompt do Jarvis (vazio = padrão)</label><textarea name=\"prompt\" rows=\"6\" style=\"width:100%;box-sizing:border-box;padding:12px;margin:6px 0 16px;font-size:16px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff\">" + htmlEsc(gs("prompt")) + "</textarea>" +
+                          "<label>Prompt de internet e recomendações (vazio = padrão)</label><textarea name=\"webprompt\" rows=\"6\" style=\"width:100%;box-sizing:border-box;padding:12px;margin:6px 0 16px;font-size:16px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff\">" + htmlEsc(gs("prompt")) + "</textarea>" +
+                          "<label>PIN mostrado na TV</label><input name=\"pin\" inputmode=\"numeric\" autocomplete=\"off\">" +
+                          "<button type=\"submit\">Enviar para a TV</button></form></body></html>"
+                  }, { m ->
+                      val url = (m["url"] ?: "").trim()
+                      val key = (m["key"] ?: "").trim()
+                      val city = (m["city"] ?: "").trim()
+                      if (url.isEmpty()) {
+                          false
+                      } else {
+                          runOnUiThread {
+                              urlEt.setText(url)
+                              if (key.isNotEmpty()) keyEt.setText(key)
+                              cityEt.setText(city)
+                              promptEt.setText((m["prompt"] ?: "").trim())
+                              webEt.setText((m["webprompt"] ?: "").trim())
+                              toast("Dados recebidos do celular. Confirme em Salvar e conectar.")
+                          }
+                          true
+                      }
+                  })
+                  if (ip != null && srv.start()) setupServer = srv
+
+                  val dlg = AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                      .setTitle("Ajustes do Jarvis TV")
+                      .setView(sv)
+                      .setPositiveButton("Salvar e conectar") { _, _ ->
+                          prefs.edit()
+                              .putString("url", urlEt.text.toString().trim())
+                              .putString("key", keyEt.text.toString().trim())
+                              .putString("city", cityEt.text.toString().trim())
+                              .putString("prompt", promptEt.text.toString().trim())
+                              .putString("webprompt", webEt.text.toString().trim())
+                              .putBoolean("cont", contSw.isChecked)
+                              .putBoolean("web", webSw.isChecked)
+                              .apply()
+                          connectCloud()
+                          loadWeather()
+                      }
+                      .setNegativeButton("Cancelar", null)
+                      .create()
+                  dlg.setOnDismissListener {
+                      stopSetupServer()
+                      settingsDialog = null
+                      hideSystemUi()
+                  }
+                  settingsDialog = dlg
+                  dlg.show()
+              }
+
+              private fun stopSetupServer() {
+                  try {
+                      setupServer?.stop()
+                  } catch (t: Throwable) {
+                  }
+                  setupServer = null
+              }
+          }
+          JVEOF
+
+          echo "Arquivos criados:"
+          find tv -type f | sort
+
+      - name: Instalar JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Instalar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+
+      - name: Instalar Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+          cache-disabled: true
+
+      - name: Compilar o APK
+        working-directory: tv
+        run: |
+          set +e
+          gradle --no-daemon --console=plain assembleDebug > build.log 2>&1
+          code=$?
+          echo "gradle terminou com codigo $code"
+          if [ $code -ne 0 ]; then
+            echo "=============== RESUMO DOS ERROS ==============="
+            grep -E "^e: |What went wrong|Execution failed|Could not|requires|incompatible|Caused by|error:" -A4 build.log | head -n 70
+            echo "------ ultimas linhas ------"
+            tail -n 25 build.log
+            echo "================================================"
+          fi
+          exit $code
+
+      - name: Preparar o APK
+        run: |
+          mkdir -p out
+          cp tv/app/build/outputs/apk/debug/app-debug.apk out/Jarvis-TV-${{ github.run_number }}.apk
+          ls -la out
+
+      - name: Guardar como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-TV-APK
+          path: out/*.apk
+
+      - name: Publicar como Release
+        uses: softprops/action-gh-release@v2
+        continue-on-error: true
+        with:
+          tag_name: tv-${{ github.run_number }}
+          name: Jarvis TV build ${{ github.run_number }}
+          files: out/*.apk
