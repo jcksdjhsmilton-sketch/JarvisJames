@@ -174,7 +174,7 @@ jobs:
           object JarvisWeb {
               private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
               private const val API_UA = "JarvisLocal/2.0 (assistente pessoal Android)"
-              private const val MAX_CHARS = 2200
+              private const val MAX_CHARS = 4000
 
               fun norm(s: String): String {
                   val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
@@ -189,7 +189,8 @@ jobs:
               private val leadRe = Regex("^(?:voce )?(?:sabe|conhece|poderia|pode|consegue)(?: me)?(?: dizer| falar| informar)? ")
               private val selfRe = Regex("\\b(?:voce|seu|sua|seus|suas|te)\\b")
               private val timeRe = Regex("\\b(?:ultimas?|ultimos?|recentes?|esta semana|essa semana|este mes|esse mes|este ano|esse ano|20(?:2[3-9]|3[0-9])|dolar|euro|bitcoin|cotacao|ibovespa|selic|inflacao|placar|campeonato|quem ganhou|quanto custa|quanto esta|preco|lancamento|lancou|estreia|em cartaz|presidente|governador|prefeito)\\b")
-              private val factRe = Regex("^(?:quem|quando|onde|qual|quais|quanto|quantos|quantas|quanta|por que|porque|o que|oque|que dia|que ano|como (?:fazer|faz|se faz|funciona|instalar|resolver|chegar|surgiu|foi|e feito|se escreve)|me (?:fale|diga|explique|conte)|fale sobre|explique|defina|diferenca entre|significado de|capital d)\\b")
+              private val factRe = Regex("^(?:quem (?:e|foi|era|sao|ganhou|venceu|fez|descobriu|inventou|escreveu|dirigiu|canta|cantou|atua|estrela)|quando (?:foi|e|sera|nasceu|morreu|comeca|comecou|termina|estreia|lancou|acontece|aconteceu|sai|saiu)|onde (?:fica|ficam|foi|nasceu|e que fica)|qual (?:e )?(?:a |o )?(?:capital|populacao|distancia|altura|idade|data|horario|resultado|placar|moeda|area|fuso|preco|valor)|quant[oa]s? (?:anos|habitantes|pessoas|km|quilometros|metros|gols|titulos|paises|estados|custa|esta|vale|tempo falta)|capital d|que dia (?:e|foi|sera)|em que ano|significado de|quem e o dono)\\b")
+              private val opinionRe = Regex("\\b(?:acha|opiniao|prefere|gosta|devo|deveria|melhor jeito|me ajuda|ajude|sugere|sugestao|recomenda)\\b")
               private val defRe = Regex("^(?:quem (?:e|foi|era|sao)|o que (?:e|foi|sao|significa)|me (?:fale|conte) sobre|fale sobre|defina|explique|me explique|capital d|significado de|diferenca entre)\\b")
 
               // n0 = texto normalizado (sem acento, minúsculo). nameN = nome do assistente normalizado.
@@ -206,12 +207,13 @@ jobs:
                   val q = leadRe.replace(n, "")
                   if (selfRe.containsMatchIn(q)) return WebMode.NONE
                   if (timeRe.containsMatchIn(q)) return WebMode.GENERAL
-                  if (q.split(" ").size >= 3 && factRe.containsMatchIn(q)) return WebMode.GENERAL
+                  if (q.split(" ").size >= 3 && factRe.containsMatchIn(q) && !opinionRe.containsMatchIn(q)) return WebMode.GENERAL
                   return WebMode.NONE
               }
 
               fun cleanQuery(raw: String): String {
                   var q = raw.trim()
+                  q = q.replace(Regex("(?i)\\b(?:j[aá]rvis|jarvi|garvis|jarves|jarvys|charvis|e a[ií]|ei|hey|ok)\\b[,.:!]?"), " ")
                   q = q.replace(Regex("(?i)\\b(?:pesquise|pesquisar|pesquisa|procure|procurar|busque|buscar)\\b(?: na internet| no google| na web| online)?(?: por| sobre| a respeito de)?"), " ")
                   q = q.replace(Regex("(?i)\\b(?:na internet|no google|na web)\\b"), " ")
                   q = q.replace(Regex("(?i)^\\s*(?:por favor|voc[eê] (?:sabe|pode|poderia)(?: me)?(?: dizer)?)\\b,?"), " ")
@@ -247,14 +249,14 @@ jobs:
                   val rule = when (mode) {
                       WebMode.WEATHER -> "Responda de forma natural, citando a temperatura atual, a mínima, a máxima e a chance de chuva, em até 3 frases curtas."
                       WebMode.NEWS -> "Resuma as principais manchetes em até 3 frases curtas."
-                      else -> "Responda usando as informações acima quando forem relevantes. Se elas não responderem à pergunta, diga que não encontrou e responda com cautela."
+                      else -> "Responda direto à pergunta usando as informações acima: os trechos das páginas são o conteúdo real dos sites encontrados, então confie neles e cite o fato pedido. Só se nada tiver relação com a pergunta, responda com o que você sabe e avise que não confirmou na internet. Nunca responda apenas que não sabe."
                   }
                   return head + " (" + now + "):\n" + ctx.text + "\n" + rule +
                       " Fale em português do Brasil, sem listas, sem markdown e sem links.\nPergunta do usuário: " + question
               }
 
               suspend fun fetch(mode: WebMode, raw: String, savedCity: String, log: (String) -> Unit): WebCtx? {
-                  return withTimeout(16000L) {
+                  return withTimeout(if (mode == WebMode.GENERAL) 24000L else 16000L) {
                       when (mode) {
                           WebMode.WEATHER -> weatherCtx(raw, savedCity, log)
                           WebMode.NEWS -> newsCtx(raw, log)
@@ -268,7 +270,8 @@ jobs:
 
               private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 
-              private fun http(url: String, method: String = "GET", body: String? = null, ua: String = UA, accept: String = "*/*"): String {
+              private fun http(url: String, method: String = "GET", body: String? = null, ua: String = UA, accept: String = "*/*", fast: Boolean = false): String {
+                  val t0 = System.currentTimeMillis()
                   var u = url
                   var m = method
                   var b = body
@@ -276,8 +279,8 @@ jobs:
                       val c = URL(u).openConnection() as HttpURLConnection
                       try {
                           c.instanceFollowRedirects = false
-                          c.connectTimeout = 7000
-                          c.readTimeout = 9000
+                          c.connectTimeout = if (fast) 4000 else 7000
+                          c.readTimeout = if (fast) 5000 else 9000
                           c.requestMethod = m
                           c.setRequestProperty("User-Agent", ua)
                           c.setRequestProperty("Accept", accept)
@@ -301,7 +304,7 @@ jobs:
                           val sb = StringBuilder()
                           val buf = CharArray(8192)
                           c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
-                              while (sb.length < 600000) {
+                              while (sb.length < (if (fast) 250000 else 600000) && (!fast || System.currentTimeMillis() - t0 < 6000)) {
                                   val k = r.read(buf)
                                   if (k < 0) break
                                   sb.append(buf, 0, k)
@@ -343,6 +346,42 @@ jobs:
                       sb.append("\n")
                   }
                   return sb.toString()
+              }
+
+              private val skipHosts = listOf("youtube.", "youtu.be", "facebook.", "instagram.", "twitter.", "x.com", "tiktok.", "google.", "bing.", "pinterest.", "linkedin.", "reddit.")
+
+              private fun pageOk(url: String): Boolean {
+                  if (!url.startsWith("http")) return false
+                  val u = url.lowercase()
+                  if (u.contains(".pdf") || u.contains(".mp4")) return false
+                  for (h in skipHosts) if (u.contains(h)) return false
+                  return true
+              }
+
+              private fun pageText(url: String, q: String): String {
+                  val html = http(url, "GET", null, UA, "text/html,application/xhtml+xml", true).take(300000)
+                  val bi = html.indexOf("<body")
+                  var body = if (bi > 0) html.substring(bi) else html
+                  body = body.replace(Regex("(?is)<(nav|footer|header|aside|form|noscript|svg)\\b[^>]*>.*?</\\1>"), " ")
+                  val text = clean(body)
+                  if (text.length < 80) return ""
+                  val kw = norm(q).split(" ").filter { it.length >= 4 }.toSet()
+                  val sents = text.split(Regex("(?<=[.!?])\\s+")).filter { it.length in 40..420 }
+                  val scored = ArrayList<Pair<Int, Int>>()
+                  for (i in sents.indices) {
+                      val ns = norm(sents[i])
+                      var sc = 0
+                      for (k in kw) if (ns.contains(k)) sc++
+                      if (sc > 0) scored.add(Pair(sc, i))
+                  }
+                  val pick = if (scored.isEmpty()) sents.take(4).indices.toList()
+                             else scored.sortedWith(compareByDescending<Pair<Int, Int>> { it.first }.thenBy { it.second }).take(5).map { it.second }.sorted()
+                  val sb = StringBuilder()
+                  for (i in pick) {
+                      if (sb.length + sents[i].length > 1100) break
+                      sb.append(sents[i]).append(" ")
+                  }
+                  return sb.toString().trim()
               }
 
               // ---------- buscadores ----------
@@ -472,6 +511,19 @@ jobs:
                           val firstWiki = wk.take(1)
                           sb.append(fmt(firstWiki, 0, 700))
                           sb.append(fmt(hits.take(4), firstWiki.size, 320))
+                          val pageHits = hits.filter { pageOk(it.url) }.take(2)
+                          val pages = pageHits.map { h -> async(Dispatchers.IO) { try { pageText(h.url, q) } catch (t: Throwable) { "" } } }
+                          var pi = 0
+                          for (d in pages) {
+                              val tx = d.await()
+                              val h = pageHits[pi]
+                              pi++
+                              if (tx.isNotEmpty()) {
+                                  if (pi == 1) sb.append("Trechos lidos nas páginas:\n")
+                                  sb.append("- ").append(h.source).append(": ").append(tx).append("\n")
+                              }
+                          }
+                          log("Páginas lidas: " + pages.size)
                           val urls = ArrayList<String>()
                                     for (h in firstWiki) if (h.url.isNotEmpty()) urls.add(h.url)
                                     for (h in hits.take(4)) if (h.url.isNotEmpty()) urls.add(h.url)
@@ -2044,7 +2096,7 @@ jobs:
                   return persona +
                       "\nData e hora atuais: " + nowStr() + "." +
                       (if (city.isBlank()) "" else "\nCidade do usuário: " + city + ".") +
-                      " Você tem acesso à internet: quando a mensagem do usuário trouxer resultados de pesquisa, baseie-se neles e não invente fatos. Se não tiver certeza, diga que não sabe."
+                      " Você tem acesso à internet: quando a mensagem do usuário trouxer resultados de pesquisa, baseie-se neles e não invente fatos. Se não tiver certeza, diga o que sabe e avise que pode estar desatualizado, em vez de apenas dizer que não sabe."
               }
 
               private fun cloudHistory(): List<Pair<Boolean, String>> {
