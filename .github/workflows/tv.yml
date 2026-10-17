@@ -167,6 +167,7 @@ jobs:
 
           class WebCtx(val text: String, val city: String?, val urls: List<String> = emptyList())
 
+          const val NOT_FOUND_NOTE = "[Nota: pesquisei na internet agora e não encontrei a informação pedida. Não invente datas, números, nomes ou fatos específicos. Diga com clareza que não encontrou e sugira reformular a pergunta.] "
           const val NO_WEB_NOTE = "[Nota: sem acesso à internet neste momento. Responda com o que você sabe e avise se algo puder estar desatualizado.] "
 
           // Pesquisa na internet 100% gratuita e sem chave de API:
@@ -249,7 +250,7 @@ jobs:
                   val rule = when (mode) {
                       WebMode.WEATHER -> "Responda de forma natural, citando a temperatura atual, a mínima, a máxima e a chance de chuva, em até 3 frases curtas."
                       WebMode.NEWS -> "Resuma as principais manchetes em até 3 frases curtas."
-                      else -> "Responda direto à pergunta usando as informações acima: os trechos das páginas são o conteúdo real dos sites encontrados, então confie neles e cite o fato pedido. Só se nada tiver relação com a pergunta, responda com o que você sabe e avise que não confirmou na internet. Nunca responda apenas que não sabe."
+                      else -> "Responda direto à pergunta usando apenas as informações acima. Se o dado pedido (data, número, nome) aparecer nos trechos, diga-o. Se não aparecer, diga que não encontrou essa informação na internet e não invente valores."
                   }
                   return head + " (" + now + "):\n" + ctx.text + "\n" + rule +
                       " Fale em português do Brasil, sem listas, sem markdown e sem links.\nPergunta do usuário: " + question
@@ -264,6 +265,14 @@ jobs:
                           WebMode.NONE -> null
                       }
                   }
+              }
+
+              // palavras-chave: tira "qual", "de", "do", etc. para a busca ficar com o assunto
+              private const val STOP = "qual|quais|quando|quem|onde|quanto|quantos|quantas|que|o|a|os|as|do|da|dos|das|de|e|um|uma|foi|sao|era|ser|em|no|na|sobre|por|como|pra|para|voce|sabe|me|diga|fale|dia|data|hora|esta|e"
+
+              fun keywordQuery(q: String): String {
+                  val k = norm(q).replace(Regex("\\b(?:" + STOP + ")\\b"), " ").replace(Regex("\\s+"), " ").trim()
+                  return if (k.length < 3) q else k
               }
 
               // ---------- rede ----------
@@ -441,8 +450,8 @@ jobs:
                   return out
               }
 
-              private fun wiki(q: String): List<WebHit> {
-                  val url = "https://pt.wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrlimit=3&gsrsearch=" + enc(q) +
+              private fun wiki(q: String, lang: String = "pt"): List<WebHit> {
+                  val url = "https://" + lang + ".wikipedia.org/w/api.php?action=query&format=json&generator=search&gsrlimit=3&gsrsearch=" + enc(q) +
                       "&prop=extracts&exintro=1&explaintext=1&exsentences=4&exlimit=3&redirects=1"
                   val j = JSONObject(http(url, "GET", null, API_UA, "application/json"))
                   val pages = j.optJSONObject("query")?.optJSONObject("pages") ?: return emptyList()
@@ -453,7 +462,7 @@ jobs:
                       val p = pages.getJSONObject(k)
                       val ex = p.optString("extract", "").trim()
                       if (ex.isEmpty()) continue
-                      tmp.add(Pair(p.optInt("index", 99), WebHit(p.optString("title", ""), ex.take(700), "Wikipédia", "https://pt.wikipedia.org/wiki/" + enc(p.optString("title", "").replace(' ', '_')))))
+                      tmp.add(Pair(p.optInt("index", 99), WebHit(p.optString("title", ""), ex.take(700), "Wikipédia", "https://" + lang + ".wikipedia.org/wiki/" + enc(p.optString("title", "").replace(' ', '_')))))
                   }
                   tmp.sortBy { it.first }
                   val out = ArrayList<WebHit>()
@@ -493,16 +502,21 @@ jobs:
                   val q = cleanQuery(raw)
                   val nq = leadRe.replace(norm(raw), "")
                   val definitional = defRe.containsMatchIn(nq)
+                  val kw = keywordQuery(q)
                   return coroutineScope {
                       val webD = async(Dispatchers.IO) { runSrc("DuckDuckGo", log) { ddg(q) } }
+                      val webK = async(Dispatchers.IO) { if (kw != q) runSrc("DuckDuckGo 2", log) { ddg(kw) } else emptyList<WebHit>() }
                       val wikiD = async(Dispatchers.IO) {
                           if (definitional) runSrc("Wikipédia", log) { wiki(q) } else emptyList<WebHit>()
                       }
-                      var hits = webD.await()
-                      if (hits.isEmpty()) hits = withContext(Dispatchers.IO) { runSrc("Bing", log) { bing(q) } }
+                      var hits = (webD.await() + webK.await()).distinctBy { it.url }
+                      if (hits.isEmpty()) hits = withContext(Dispatchers.IO) { runSrc("Bing", log) { bing(kw) } }
                       var wk = wikiD.await()
                       if (hits.isEmpty() && wk.isEmpty() && !definitional) {
                           wk = withContext(Dispatchers.IO) { runSrc("Wikipédia", log) { wiki(q) } }
+                      }
+                      if (hits.isEmpty() && wk.isEmpty()) {
+                          wk = withContext(Dispatchers.IO) { runSrc("Wikipédia EN", log) { wiki(kw, "en") } }
                       }
                       if (hits.isEmpty() && wk.isEmpty()) {
                           null
@@ -2401,7 +2415,7 @@ jobs:
                           val strict = mode == WebMode.WEATHER || mode == WebMode.NEWS
                           if (!isOnline()) {
                               if (strict) directMsg = "Estou sem conexão com a internet agora, então não consigo consultar isso."
-                              else prompt = NO_WEB_NOTE + text
+                              else prompt = NOT_FOUND_NOTE + text
                           } else {
                               runOnUiThread { showSearchPage(mode, text) }
                               var ctx: WebCtx? = null
@@ -2420,7 +2434,7 @@ jobs:
                               } else if (strict) {
                                   directMsg = "Não consegui buscar essa informação na internet agora."
                               } else {
-                                  prompt = NO_WEB_NOTE + text
+                                  prompt = NOT_FOUND_NOTE + text
                               }
                           }
                       }
@@ -2540,6 +2554,28 @@ jobs:
               }
 
               // ---------------------------------------------------------------- diálogos
+
+              private var tapX = 0f
+              private var tapY = 0f
+              private var tapT = 0L
+
+              override fun dispatchTouchEvent(ev: android.view.MotionEvent?): Boolean {
+                  if (ev != null) {
+                      when (ev.actionMasked) {
+                          android.view.MotionEvent.ACTION_DOWN -> {
+                              tapX = ev.x
+                              tapY = ev.y
+                              tapT = System.currentTimeMillis()
+                          }
+                          android.view.MotionEvent.ACTION_UP -> {
+                              val quick = System.currentTimeMillis() - tapT < 400
+                              val still = Math.abs(ev.x - tapX) < 40 && Math.abs(ev.y - tapY) < 40
+                              if (quick && still && settingsDialog == null) ui.post { openTyped() }
+                          }
+                      }
+                  }
+                  return super.dispatchTouchEvent(ev)
+              }
 
               private fun openTyped() {
                   if (settingsDialog != null) return
