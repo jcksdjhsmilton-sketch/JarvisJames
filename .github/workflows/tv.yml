@@ -175,8 +175,8 @@ jobs:
           object JarvisWeb {
               private const val UA = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
               private const val API_UA = "JarvisLocal/2.0 (assistente pessoal Android)"
-              private const val MAX_CHARS = 12000
-              private const val PAGE_CHARS = 10000
+              private const val MAX_CHARS = 33000
+              private const val PAGE_CHARS = 30000
 
               fun norm(s: String): String {
                   val d = Normalizer.normalize(s.lowercase(Locale("pt", "BR")), Normalizer.Form.NFD)
@@ -707,6 +707,89 @@ jobs:
           }
 
           object JarvisCloud {
+              // ---- DeepSeek (provedor principal) ----
+              const val DS_URL = "https://api.deepseek.com"
+              const val DS_MODEL = "deepseek-v4-flash"
+              // o workflow troca este marcador pela chave do secret DEEPSEEK_API_KEY (se existir)
+              private val DS_KEY_BUILD = "__DEEPSEEK_KEY__"
+              fun builtKey(): String = if (DS_KEY_BUILD.startsWith("__")) "" else DS_KEY_BUILD
+              // DeepSeek é usado quando: há chave embutida, a URL está vazia/é do DeepSeek, ou a chave começa com sk-
+              fun useDs(url: String, key: String): Boolean =
+                  builtKey().isNotEmpty() || url.isBlank() || url.contains("deepseek", true) || key.trim().startsWith("sk-")
+              fun dsKey(key: String): String = if (builtKey().isNotEmpty()) builtKey() else key.trim()
+
+              private fun streamDs(key: String, system: String, hist: List<Pair<Boolean, String>>, message: String, maxTokens: Int, onPiece: (String) -> Unit) {
+                  val body = JSONObject()
+                  body.put("model", DS_MODEL)
+                  val arr = org.json.JSONArray()
+                  arr.put(JSONObject().put("role", "system").put("content", system))
+                  for (h in hist) arr.put(JSONObject().put("role", if (h.first) "user" else "assistant").put("content", h.second))
+                  arr.put(JSONObject().put("role", "user").put("content", message))
+                  body.put("messages", arr)
+                  body.put("stream", true)
+                  body.put("max_tokens", maxTokens)
+                  body.put("temperature", 0.3)
+                  // sem "thinking": resposta direta, mais rápida e gasta bem menos tokens
+                  body.put("thinking", JSONObject().put("type", "disabled"))
+                  val c = URL(DS_URL + "/chat/completions").openConnection() as HttpURLConnection
+                  c.connectTimeout = 10000
+                  c.readTimeout = 90000
+                  c.requestMethod = "POST"
+                  c.setRequestProperty("Authorization", "Bearer " + key)
+                  c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                  c.setRequestProperty("Accept", "text/event-stream")
+                  c.setRequestProperty("Accept-Encoding", "identity")
+                  c.setRequestProperty("User-Agent", "JarvisApp/2.0")
+                  try {
+                      c.doOutput = true
+                      c.outputStream.use { os -> os.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                      val rc = c.responseCode
+                      if (rc != 200) {
+                          var err = ""
+                          try {
+                              err = c.errorStream?.bufferedReader(Charsets.UTF_8)?.use { r -> r.readText() }?.take(200) ?: ""
+                          } catch (t: Throwable) {
+                          }
+                          val why = when (rc) {
+                              401 -> "chave da API inválida"
+                              402 -> "sem saldo no DeepSeek"
+                              429 -> "muitas requisições, tente de novo"
+                              else -> "erro"
+                          }
+                          throw RuntimeException("DeepSeek HTTP " + rc + " (" + why + ") " + err)
+                      }
+                      var got = false
+                      var finished = false
+                      c.inputStream.bufferedReader(Charsets.UTF_8).use { r ->
+                          while (true) {
+                              val line = r.readLine() ?: break
+                              if (!line.startsWith("data:")) continue
+                              val payload = line.substring(5).trim()
+                              if (payload == "[DONE]") {
+                                  finished = true
+                                  break
+                              }
+                              val js = try { JSONObject(payload) } catch (t: Throwable) { continue }
+                              val ch = js.optJSONArray("choices")
+                              if (ch != null && ch.length() > 0) {
+                                  val c0 = ch.getJSONObject(0)
+                                  val d = c0.optJSONObject("delta")
+                                  if (d != null && !d.isNull("content")) {
+                                      val t = d.optString("content", "")
+                                      if (t.isNotEmpty()) {
+                                          got = true
+                                          onPiece(t)
+                                      }
+                                  }
+                                  if (!c0.isNull("finish_reason")) finished = true
+                              }
+                          }
+                      }
+                      if (!finished && !got) throw RuntimeException("DeepSeek: conexão encerrada sem resposta")
+                  } finally {
+                      c.disconnect()
+                  }
+              }
               private fun baseUrl(raw: String): String {
                   var b = raw.trim().trimEnd('/')
                   if (!b.startsWith("http://") && !b.startsWith("https://")) b = "https://" + b
@@ -727,6 +810,7 @@ jobs:
               }
 
               fun health(base: String, key: String): Boolean {
+                  if (useDs(base, key)) return dsKey(key).isNotEmpty()
                   val c = open(base, "/health", key, "GET", 8000, 15000)
                   try {
                       if (c.responseCode != 200) return false
@@ -738,6 +822,10 @@ jobs:
               }
 
               fun stream(base: String, key: String, system: String, hist: List<Pair<Boolean, String>>, message: String, maxTokens: Int, onPiece: (String) -> Unit) {
+                  if (useDs(base, key)) {
+                      streamDs(dsKey(key), system, hist, message, maxTokens, onPiece)
+                      return
+                  }
                   val body = JSONObject()
                   body.put("system", system)
                   val arr = org.json.JSONArray()
@@ -1636,7 +1724,7 @@ jobs:
                   ui.postDelayed(tick, 30000)
                   ui.post(weatherTick)
 
-                  if (gs("url").isBlank() || gs("key").isBlank()) {
+                  if (!cloudConfigured()) {
                       ui.postDelayed({ openSettings() }, 600)
                   } else {
                       connectCloud()
@@ -1757,6 +1845,9 @@ jobs:
               private fun gs(k: String, d: String = ""): String = prefs.getString(k, d) ?: d
 
               private fun gb(k: String, d: Boolean): Boolean = prefs.getBoolean(k, d)
+              private fun cloudConfigured(): Boolean =
+                  if (JarvisCloud.useDs(gs("url"), gs("key"))) JarvisCloud.dsKey(gs("key")).isNotEmpty()
+                  else gs("url").isNotBlank() && gs("key").isNotBlank()
 
               private fun u(v: Int): Int = Math.max(1, Math.round(v * unit))
 
@@ -1956,10 +2047,10 @@ jobs:
 
               private fun updateConn() {
                   if (cloudOk) {
-                      connTv.text = "● SERVIDOR CONECTADO"
+                      connTv.text = "● IA CONECTADA"
                       connTv.setTextColor(Pal.OK)
-                  } else if (gs("url").isBlank()) {
-                      connTv.text = "● SERVIDOR NÃO CONFIGURADO"
+                  } else if (!cloudConfigured()) {
+                      connTv.text = "● CHAVE DA IA NÃO CONFIGURADA"
                       connTv.setTextColor(Pal.WARN)
                   } else {
                       connTv.text = "● SERVIDOR FORA DO AR"
@@ -2119,7 +2210,7 @@ jobs:
               private fun connectCloud() {
                   val u = gs("url")
                   val k = gs("key")
-                  if (u.isBlank() || k.isBlank()) {
+                  if (!cloudConfigured()) {
                       cloudOk = false
                       setState(state)
                       return
@@ -2598,7 +2689,7 @@ jobs:
                           if (finalText.isBlank()) {
                               if (fl != null) {
                                   cloudOk = false
-                                  reply("Não consegui falar com o servidor. Verifique se o notebook do Kaggle está rodando.")
+                                  reply(if (JarvisCloud.useDs(url, key)) "Não consegui falar com o DeepSeek. Verifique a internet, a chave da API e o saldo." else "Não consegui falar com o servidor. Verifique se o notebook do Kaggle está rodando.")
                               } else {
                                   reply("Desculpe, não consegui formular uma resposta.")
                               }
@@ -2753,8 +2844,8 @@ jobs:
                   else "Conecte a TV ao Wi-Fi para preencher pelo celular."
                   col.addView(info, LinearLayout.LayoutParams(MATCH, WRAP))
 
-                  val urlEt = inputField("URL do servidor (https://xxxx.ngrok-free.dev)", gs("url"), false)
-                  val keyEt = inputField("API_KEY", gs("key"), true)
+                  val urlEt = inputField("URL (vazio = DeepSeek)", gs("url"), false)
+                  val keyEt = inputField("API_KEY (sk-... do DeepSeek)", gs("key"), true)
                   val cityEt = inputField("Cidade (para o tempo)", gs("city"), false)
                   val promptEt = EditText(this)
                   promptEt.hint = "Prompt do Jarvis (vazio = padrão)"
@@ -2793,7 +2884,7 @@ jobs:
                       val url = (m["url"] ?: "").trim()
                       val key = (m["key"] ?: "").trim()
                       val city = (m["city"] ?: "").trim()
-                      if (url.isEmpty()) {
+                      if (url.isEmpty() && key.isEmpty() && city.isEmpty()) {
                           false
                       } else {
                           runOnUiThread {
@@ -2846,6 +2937,17 @@ jobs:
 
           echo "Arquivos criados:"
           find tv -type f | sort
+
+      - name: Injetar chave do DeepSeek (secret)
+        env:
+          DEEPSEEK_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          if [ -n "$DEEPSEEK_KEY" ]; then
+            grep -rl "__DEEPSEEK_KEY__" tv/app/src | xargs sed -i "s|__DEEPSEEK_KEY__|$DEEPSEEK_KEY|g"
+            echo "Chave do DeepSeek embutida a partir do secret."
+          else
+            echo "::warning::Secret DEEPSEEK_API_KEY não definido. Digite a chave nos Ajustes do app."
+          fi
 
       - name: Instalar JDK 17
         uses: actions/setup-java@v4
