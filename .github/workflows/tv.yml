@@ -2031,12 +2031,17 @@ jobs:
                   }
               }
 
+              private fun defaultPersona(): String =
+                  "Você é Jarvis, um assistente pessoal de voz inspirado no Jarvis do Homem de Ferro, que fica na TV da sala. " +
+                  "Fale sempre em português do Brasil. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
+                  "Responda em no máximo 3 frases curtas. Não use markdown, listas, emojis nem símbolos, porque suas respostas serão faladas em voz alta. " +
+                  "Se não souber algo, diga com honestidade."
+
               private fun buildSystemPrompt(): String {
                   val city = gs("city")
-                  return "Você é Jarvis, um assistente pessoal de voz inspirado no Jarvis do Homem de Ferro, que fica na TV da sala. " +
-                      "Fale sempre em português do Brasil. Seja educado, eficiente e use uma leve ironia elegante, como um mordomo de alta tecnologia. " +
-                      "Responda em no máximo 3 frases curtas. Não use markdown, listas, emojis nem símbolos, porque suas respostas serão faladas em voz alta. " +
-                      "Se não souber algo, diga com honestidade." +
+                  val custom = gs("prompt").trim()
+                  val persona = if (custom.isNotEmpty()) custom.take(1200) else defaultPersona()
+                  return persona +
                       "\nData e hora atuais: " + nowStr() + "." +
                       (if (city.isBlank()) "" else "\nCidade do usuário: " + city + ".") +
                       " Você tem acesso à internet: quando a mensagem do usuário trouxer resultados de pesquisa, baseie-se neles e não invente fatos. Se não tiver certeza, diga que não sabe."
@@ -2549,6 +2554,12 @@ jobs:
                   val urlEt = inputField("URL do servidor (https://xxxx.ngrok-free.dev)", gs("url"), false)
                   val keyEt = inputField("API_KEY", gs("key"), true)
                   val cityEt = inputField("Cidade (para o tempo)", gs("city"), false)
+                  val promptEt = EditText(this)
+                  promptEt.hint = "Prompt do Jarvis (vazio = padrão)"
+                  promptEt.setText(gs("prompt"))
+                  promptEt.minLines = 3
+                  promptEt.maxLines = 6
+                  promptEt.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                   val contSw = Switch(this)
                   contSw.text = "Escuta contínua (reabre o microfone após cada resposta)"
                   contSw.isChecked = gb("cont", false)
@@ -2558,6 +2569,7 @@ jobs:
                   col.addView(urlEt, vLp(14))
                   col.addView(keyEt, vLp(6))
                   col.addView(cityEt, vLp(6))
+                  col.addView(promptEt, vLp(6))
                   col.addView(contSw, vLp(14))
                   col.addView(webSw, vLp(8))
 
@@ -2572,6 +2584,7 @@ jobs:
                           "<label>URL do servidor</label><input name=\"url\" value=\"" + htmlEsc(gs("url")) + "\">" +
                           "<label>API_KEY (deixe vazio para manter a atual)</label><input name=\"key\" type=\"password\" autocomplete=\"off\">" +
                           "<label>Cidade</label><input name=\"city\" value=\"" + htmlEsc(gs("city")) + "\">" +
+                          "<label>Prompt do Jarvis (vazio = padrão)</label><textarea name=\"prompt\" rows=\"6\" style=\"width:100%;box-sizing:border-box;padding:12px;margin:6px 0 16px;font-size:16px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff\">" + htmlEsc(gs("prompt")) + "</textarea>" +
                           "<label>PIN mostrado na TV</label><input name=\"pin\" inputmode=\"numeric\" autocomplete=\"off\">" +
                           "<button type=\"submit\">Enviar para a TV</button></form></body></html>"
                   }, { m ->
@@ -2585,6 +2598,7 @@ jobs:
                               urlEt.setText(url)
                               if (key.isNotEmpty()) keyEt.setText(key)
                               cityEt.setText(city)
+                              promptEt.setText((m["prompt"] ?: "").trim())
                               toast("Dados recebidos do celular. Confirme em Salvar e conectar.")
                           }
                           true
@@ -2600,6 +2614,7 @@ jobs:
                               .putString("url", urlEt.text.toString().trim())
                               .putString("key", keyEt.text.toString().trim())
                               .putString("city", cityEt.text.toString().trim())
+                              .putString("prompt", promptEt.text.toString().trim())
                               .putBoolean("cont", contSw.isChecked)
                               .putBoolean("web", webSw.isChecked)
                               .apply()
