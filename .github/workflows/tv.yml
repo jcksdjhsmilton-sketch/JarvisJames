@@ -1474,6 +1474,212 @@ jobs:
           }
           JVEOF
 
+          cat > tv/app/src/main/kotlin/br/local/jarvis/tv/Mic.kt <<'JVEOF'
+          package br.local.jarvis.tv
+
+          import android.content.Context
+          import java.io.BufferedReader
+          import java.io.InputStreamReader
+          import java.net.ServerSocket
+          import java.net.Socket
+          import java.net.URLDecoder
+          import java.security.KeyStore
+          import javax.net.ssl.KeyManagerFactory
+          import javax.net.ssl.SSLContext
+
+          // Microfone pelo celular: o celular reconhece a fala (Web Speech do navegador) e manda o TEXTO para a TV.
+          // Usa HTTPS com certificado próprio (gerado no build), porque o navegador só libera o microfone em página segura.
+          class MicServer(
+              private val ctx: Context,
+              private val port: Int,
+              private val pin: String,
+              private val onPartial: (String) -> Unit,
+              private val onFinal: (String) -> Boolean,
+              private val isBusy: () -> Boolean
+          ) {
+              @Volatile private var running = false
+              @Volatile var https = false
+              private var server: ServerSocket? = null
+              private var fails = 0
+              private var blockedUntil = 0L
+
+              fun start(): Boolean {
+                  var s: ServerSocket? = null
+                  try {
+                      val pw = "jarvis123".toCharArray()
+                      val ks = KeyStore.getInstance("PKCS12")
+                      ctx.resources.openRawResource(R.raw.jarvis_ssl).use { ks.load(it, pw) }
+                      val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                      kmf.init(ks, pw)
+                      val sc = SSLContext.getInstance("TLS")
+                      sc.init(kmf.keyManagers, null, null)
+                      s = sc.serverSocketFactory.createServerSocket(port)
+                      https = true
+                  } catch (t: Throwable) {
+                      s = null
+                      https = false
+                  }
+                  return try {
+                      if (s == null) s = ServerSocket(port)
+                      server = s
+                      running = true
+                      val ss = s
+                      Thread { loop(ss) }.start()
+                      true
+                  } catch (t: Throwable) {
+                      false
+                  }
+              }
+
+              fun stop() {
+                  running = false
+                  try {
+                      server?.close()
+                  } catch (t: Throwable) {
+                  }
+                  server = null
+              }
+
+              private fun loop(s: ServerSocket) {
+                  while (running) {
+                      try {
+                          val c = s.accept()
+                          Thread { handle(c) }.start()
+                      } catch (t: Throwable) {
+                          if (!running) break
+                      }
+                  }
+              }
+
+              @Synchronized private fun checkPin(p: String?): Int {
+                  val now = System.currentTimeMillis()
+                  if (now < blockedUntil) return 429
+                  if (p == pin) {
+                      fails = 0
+                      return 200
+                  }
+                  fails++
+                  if (fails >= 5) {
+                      blockedUntil = now + 60000
+                      fails = 0
+                  }
+                  return 403
+              }
+
+              private fun handle(c: Socket) {
+                  try {
+                      c.soTimeout = 6000
+                      val reader = BufferedReader(InputStreamReader(c.getInputStream(), Charsets.ISO_8859_1))
+                      val first = reader.readLine() ?: return
+                      val parts = first.split(" ")
+                      if (parts.size < 2) return
+                      var len = 0
+                      while (true) {
+                          val line = reader.readLine() ?: break
+                          if (line.isEmpty()) break
+                          if (line.lowercase().startsWith("content-length:")) len = line.substring(15).trim().toIntOrNull() ?: 0
+                      }
+                      var body = ""
+                      if (parts[0] == "POST" && len > 0 && len <= 8192) {
+                          val buf = CharArray(len)
+                          var got = 0
+                          while (got < len) {
+                              val k = reader.read(buf, got, len - got)
+                              if (k < 0) break
+                              got += k
+                          }
+                          body = String(buf, 0, got)
+                      }
+                      if (parts[0] == "POST" && parts[1].startsWith("/say")) {
+                          val m = parseForm(body)
+                          val st = checkPin(m["pin"])
+                          if (st != 200) {
+                              send(c, st, "application/json", "{\"ok\":false}")
+                              return
+                          }
+                          val text = (m["text"] ?: "").trim().take(500)
+                          var busy = isBusy()
+                          if (text.isNotEmpty()) {
+                              if (m["final"] == "1") busy = !onFinal(text) else if (!busy) onPartial(text)
+                          }
+                          send(c, 200, "application/json", "{\"ok\":true,\"busy\":" + busy + "}")
+                      } else if (parts[0] == "GET") {
+                          send(c, 200, "text/html; charset=utf-8", PAGE)
+                      } else {
+                          send(c, 405, "text/plain", "x")
+                      }
+                  } catch (t: Throwable) {
+                  } finally {
+                      try {
+                          c.close()
+                      } catch (t: Throwable) {
+                      }
+                  }
+              }
+
+              private fun parseForm(body: String): Map<String, String> {
+                  val out = HashMap<String, String>()
+                  for (pair in body.split("&")) {
+                      val i = pair.indexOf('=')
+                      if (i <= 0) continue
+                      try {
+                          out[URLDecoder.decode(pair.substring(0, i), "UTF-8")] = URLDecoder.decode(pair.substring(i + 1), "UTF-8")
+                      } catch (t: Throwable) {
+                      }
+                  }
+                  return out
+              }
+
+              private fun send(c: Socket, code: Int, type: String, text: String) {
+                  val bytes = text.toByteArray(Charsets.UTF_8)
+                  val status = if (code == 200) "OK" else if (code == 403) "Forbidden" else if (code == 429) "Too Many Requests" else "Error"
+                  val head = "HTTP/1.1 " + code + " " + status + "\r\nContent-Type: " + type + "\r\nContent-Length: " + bytes.size +
+                      "\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+                  val os = c.getOutputStream()
+                  os.write(head.toByteArray(Charsets.ISO_8859_1))
+                  os.write(bytes)
+                  os.flush()
+              }
+          }
+
+          private const val PAGE = """<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Jarvis Microfone</title>
+          <style>body{font-family:sans-serif;background:#070b14;color:#e0f7ff;margin:0;padding:20px;font-size:18px}
+          input{width:100%;box-sizing:border-box;padding:12px;margin:6px 0 14px;font-size:18px;border-radius:10px;border:1px solid #1b2a44;background:#0a1220;color:#e0f7ff}
+          button{width:100%;padding:16px;font-size:20px;font-weight:bold;border:0;border-radius:14px;background:#00e5ff;color:#070b14;margin-top:8px}
+          #mic.on{background:#ff4d6d;color:#fff}#box{min-height:90px;padding:12px;border:1px solid #1b2a44;border-radius:10px;margin:14px 0;font-style:italic}label,#msg{color:#8196ae}</style></head><body>
+          <h2>Jarvis na TV &middot; Microfone</h2>
+          <label>PIN mostrado na TV</label><input id="pin" inputmode="numeric" autocomplete="off">
+          <button id="mic">&#127908; Ligar microfone</button>
+          <div id="box">...</div><div id="msg"></div>
+          <input id="txt" placeholder="ou digite / use o ditado do teclado"><button id="send">Enviar texto</button>
+          <script>
+          var q=function(i){return document.getElementById(i)};
+          var pin=q('pin'),mic=q('mic'),box=q('box'),msg=q('msg'),txt=q('txt');
+          try{pin.value=localStorage.getItem('pin')||''}catch(e){}
+          var rec=null,on=false,last=0;
+          function post(t,fin){
+           try{localStorage.setItem('pin',pin.value)}catch(e){}
+           fetch('/say',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'pin='+encodeURIComponent(pin.value)+'&final='+(fin?1:0)+'&text='+encodeURIComponent(t)})
+           .then(function(r){return r.json().then(function(j){j.st=r.status;return j})})
+           .then(function(j){msg.textContent=j.st==403?'PIN incorreto.':j.st==429?'Muitas tentativas. Aguarde 1 minuto.':(j.busy&&fin)?'A TV ainda esta respondendo...':''})
+           .catch(function(){msg.textContent='Sem conexao com a TV.'});
+          }
+          var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+          if(!SR||!window.isSecureContext){mic.disabled=true;msg.textContent='O microfone do navegador precisa de HTTPS (abra o endereco https mostrado na TV e aceite o aviso). Enquanto isso, use o ditado do teclado na caixa abaixo.'}
+          function ui(){mic.className=on?'on':'';mic.innerHTML=on?'&#9209; Desligar microfone':'&#127908; Ligar microfone'}
+          function start(){
+           rec=new SR();rec.lang='pt-BR';rec.interimResults=true;rec.continuous=false;
+           rec.onresult=function(e){var t='',f=false;for(var i=e.resultIndex;i<e.results.length;i++){t+=e.results[i][0].transcript;if(e.results[i].isFinal)f=true}
+            box.textContent=t;var n=Date.now();if(f){post(t,true)}else if(n-last>250){last=n;post(t,false)}};
+           rec.onerror=function(e){if(e.error=='not-allowed'||e.error=='service-not-allowed'){on=false;ui();msg.textContent='Permissao de microfone negada no navegador.'}};
+           rec.onend=function(){if(on)setTimeout(function(){try{rec.start()}catch(e){}},200)};
+           rec.start();
+          }
+          mic.onclick=function(){on=!on;ui();if(on){start();try{navigator.wakeLock.request('screen')}catch(e){}}else{try{rec.stop()}catch(e){}}};
+          q('send').onclick=function(){var t=txt.value.trim();if(t){post(t,true);box.textContent=t;txt.value=''}};
+          </script></body></html>"""
+          JVEOF
+
           cat > tv/app/src/main/kotlin/br/local/jarvis/tv/MainActivity.kt <<'JVEOF'
           package br.local.jarvis.tv
 
@@ -1589,6 +1795,8 @@ jobs:
               private var lastBack = 0L
               private var longHandled = false
               private var setupServer: SetupServer? = null
+              private var micServer: MicServer? = null
+              private val micPin = (100000 + java.util.Random().nextInt(900000)).toString()
               private var settingsDialog: AlertDialog? = null
 
               private val tick = object : Runnable {
@@ -1648,11 +1856,13 @@ jobs:
               override fun onResume() {
                   super.onResume()
                   web?.onResume()
+                  startMicServer()
               }
 
               override fun onPause() {
                   super.onPause()
                   web?.onPause()
+                  stopMicServer()
               }
 
               override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -1664,6 +1874,7 @@ jobs:
                   super.onDestroy()
                   ui.removeCallbacksAndMessages(null)
                   stopSetupServer()
+                  stopMicServer()
                   try {
                       recognizer?.destroy()
                   } catch (t: Throwable) {
@@ -1894,7 +2105,7 @@ jobs:
                   replyTv.ellipsize = android.text.TextUtils.TruncateAt.END
                   bottom.addView(replyTv, vLp(12))
 
-                  hintTv = tv("OK  falar     •     ▼  digitar     •     segure OK ou ▲  ajustes", 22, Pal.MUTED)
+                  hintTv = tv("OK  falar   •   ▼  digitar   •   ▶  mic do celular   •   segure OK ou ▲  ajustes", 22, Pal.MUTED)
                   hintTv.gravity = Gravity.CENTER
                   bottom.addView(hintTv, vLp(16))
 
@@ -2641,7 +2852,7 @@ jobs:
                       event?.startTracking()
                       return true
                   }
-                  if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) return true
+                  if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) return true
                   if (keyCode == KeyEvent.KEYCODE_DPAD_UP || keyCode == KeyEvent.KEYCODE_MENU || keyCode == KeyEvent.KEYCODE_SETTINGS) return true
                   return super.onKeyDown(keyCode, event)
               }
@@ -2662,6 +2873,10 @@ jobs:
                       } else {
                           talk()
                       }
+                      return true
+                  }
+                  if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                      showMicInfo()
                       return true
                   }
                   if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
@@ -2862,6 +3077,38 @@ jobs:
                   dlg.show()
               }
 
+              private fun startMicServer() {
+                  if (micServer != null) return
+                  val srv = MicServer(this, 8766, micPin,
+                      { p -> runOnUiThread { heardTv.text = "“" + p + "”" } },
+                      { t -> if (busy) false else { runOnUiThread { onUserText(t, false) }; true } },
+                      { busy })
+                  if (srv.start()) micServer = srv
+              }
+
+              private fun stopMicServer() {
+                  try {
+                      micServer?.stop()
+                  } catch (t: Throwable) {
+                  }
+                  micServer = null
+              }
+
+              private fun showMicInfo() {
+                  val ip = lanIp()
+                  val https = micServer?.https == true
+                  val msg = if (ip == null) "Conecte a TV ao Wi-Fi para usar o microfone do celular."
+                  else "No celular (mesmo Wi-Fi), abra:\n\n" + (if (https) "https://" else "http://") + ip + ":8766\n\nPIN: " + micPin +
+                      (if (https) "\n\nO navegador vai avisar que a conexão não é segura (certificado próprio da TV). Toque em Avançado > Continuar. Depois toque em Ligar microfone."
+                      else "\n\nSem certificado HTTPS neste build: o microfone do navegador pode ficar bloqueado. Use o ditado do teclado na caixa de texto.")
+                  AlertDialog.Builder(this, AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+                      .setTitle("Microfone pelo celular")
+                      .setMessage(msg)
+                      .setPositiveButton("OK", null)
+                      .setOnDismissListener { hideSystemUi() }
+                      .show()
+              }
+
               private fun stopSetupServer() {
                   try {
                       setupServer?.stop()
@@ -2880,6 +3127,11 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Gerar certificado HTTPS (microfone pelo celular)
+        run: |
+          mkdir -p tv/app/src/main/res/raw
+          keytool -J-Dkeystore.pkcs12.legacy -genkeypair -alias jarvis -keyalg RSA -keysize 2048 -validity 3650 -storetype PKCS12 -keystore tv/app/src/main/res/raw/jarvis_ssl.p12 -storepass jarvis123 -keypass jarvis123 -dname "CN=jarvis-tv"
 
       - name: Instalar Android SDK
         uses: android-actions/setup-android@v3
